@@ -17,6 +17,7 @@ class App (object):
         return 'index'
 
     @cherrypy.expose
+    @cherrypy.tools.response_headers(headers = [('Content-Type', 'text/plain')])
     def login(self, app=None, back=None):
         tkt = pubtkt.ticket.Ticket(self.privkey, uid='lars',
                 validuntil = self.validuntil,
@@ -25,7 +26,13 @@ class App (object):
         cherrypy.response.cookie[self.cookiename] = str(tkt)
         
         #raise cherrypy.HTTPRedirect(back)
-        return 'login to %s as %s' % (app, cherrypy.request.login)
+        text = ['app=%s' % app]
+        for k,v in cherrypy.request.headers.items():
+            text.append('%s=%s' % (k,v))
+
+        return '\n'.join(text)
+
+        return 'login to %s as %s' % (app, cherrypy.request.headers['X-Remote-User'])
 
     @cherrypy.expose
     def logout(self, app=None):
@@ -50,6 +57,8 @@ class App (object):
         d.connect('login', '/:app/login', self.login)
         d.connect('logout', '/:app/logout', self.logout)
         d.connect('unauth', '/:app/unauth', self.unauth)
+
+        d.connect('main', '/:action', self)
 
         return d
 
