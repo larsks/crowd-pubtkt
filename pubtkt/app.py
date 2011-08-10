@@ -1,10 +1,16 @@
+import os
+import sys
 import datetime
 import pprint
+from StringIO import StringIO
+
 from M2Crypto import RSA
+from simpletal import simpleTAL, simpleTALES
 import cherrypy
 
-import pubtkt.app
-import pubtkt.ticket
+import app
+import ticket
+import crowd
 
 class App (object):
     cookiename = 'seas_ac_auth'
@@ -12,53 +18,60 @@ class App (object):
     def __init__ (self, config):
         self.config = config
 
-    @cherrypy.expose
-    def index(self):
-        return 'index'
+    def render(self, page, **ctx):
+        path = os.path.join(
+                cherrypy.request.config['pubtkt']['templatedir'],
+                '%s.html' % page)
 
-    @cherrypy.expose
-    @cherrypy.tools.response_headers(headers = [('Content-Type', 'text/plain')])
+        tales = simpleTALES.Context()
+        for k,v in ctx.items():
+            tales.addGlobal(k,v)
+
+        templ = simpleTAL.compileHTMLTemplate(open(path))
+        text = StringIO()
+        templ.expand(tales, text)
+        return text.getvalue()
+
     def login(self, app=None, back=None):
-        tkt = pubtkt.ticket.Ticket(self.privkey, uid='lars',
+        user = cherrypy.request.headers.get['X-Remote-User']
+
+        crowdapp = cherrypy.request.config['crowd:%s' % app]
+        api = crowd.Crowd(cherrypy.request.config['pubtkt']['crowd_server'],
+                crowdapp['crowd_name'], crowdapp['crowd_pass']
+                )
+        groups = api.request('user/group/nested', username=user)
+
+        tokens = [x['name'] for x in groups.get('groups', [])]
+
+        tkt = ticket.Ticket(self.privkey, uid=user,
                 validuntil = self.validuntil,
+                tokens = tokens,
                 graceperiod = self.graceperiod)
 
         cherrypy.response.cookie[self.cookiename] = str(tkt)
         
-        #raise cherrypy.HTTPRedirect(back)
-        text = ['app=%s' % app]
-        for k,v in cherrypy.request.headers.items():
-            text.append('%s=%s' % (k,v))
+        raise cherrypy.HTTPRedirect(back)
 
-        return '\n'.join(text)
-
-        return 'login to %s as %s' % (app, cherrypy.request.headers['X-Remote-User'])
-
-    @cherrypy.expose
-    def logout(self, app=None):
+    def logout(self, app=None, back=None):
         cherrypy.response.cookie[self.cookiename] = ''
         cherrypy.response.cookie[self.cookiename]['expires'] = 0
-        return 'logout %s' % app
+        return self.render('logout', back=back)
 
-    @cherrypy.expose
-    def unauth(self, app=None):
-        return 'unauth %s' % app
+    def unauth(self, app=None, back=None):
+        return self.render('unauth', back=back)
 
-    @cherrypy.expose
     @cherrypy.tools.response_headers(headers = [('Content-Type', 'text/plain')])
     def showconfig(self):
-        return pprint.pformat(cherrypy.request.app.config)
+        return pprint.pformat(cherrypy.request.config)
 
     def setup_routes(self):
         d = cherrypy.dispatch.RoutesDispatcher()
 
-        d.connect('config', '/showconfig', self.showconfig)
+        d.connect('config', '/dump',        self.showconfig)
+        d.connect('logout', '/logout',      self.logout)
+        d.connect('unauth', '/unauth',      self.unauth)
 
-        d.connect('login', '/:app/login', self.login)
-        d.connect('logout', '/:app/logout', self.logout)
-        d.connect('unauth', '/:app/unauth', self.unauth)
-
-        d.connect('main', '/:action', self)
+        d.connect('login',  '/:app/login',  self.login)
 
         return d
 

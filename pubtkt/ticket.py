@@ -1,8 +1,9 @@
 import hashlib
 import base64
-from M2Crypto import RSA
 import datetime
 import time
+
+from M2Crypto import RSA
 
 class TicketError(Exception):
     pass
@@ -33,7 +34,7 @@ class Ticket (dict):
         if isinstance(d, datetime.datetime):
             d = time.mktime(d.timetuple())
 
-        return d
+        return int(d)
 
     def ticket (self):
         dtok = []
