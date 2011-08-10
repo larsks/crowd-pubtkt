@@ -2,6 +2,12 @@ import simplejson as json
 import httplib2 as httplib
 import urllib
 
+class CrowdError (Exception):
+    def __init__ (self, msg, resp=None, content=None):
+        self.resp = resp
+        self.content = content
+        super(CrowdError, self).__init__(msg)
+
 class Crowd (object):
 
     def __init__ (self, baseurl, crowd_name, crowd_pass, 
@@ -26,11 +32,23 @@ class Crowd (object):
                 self.apiname,
                 self.apiversion,
                 method, qs)
-        resp, content = self.client.request(url)
-        return json.loads(content)
+        resp,content = self.client.request(url)
+
+        if resp['content-type'] != 'application/json':
+            raise CrowdError('Did not receive JSON response.',
+                    resp=resp, content=content)
+
+        return resp['status'], json.loads(content)
 
 if __name__ == '__main__':
+    import sys
 
-    c = Crowd('https://id.seas.harvard.edu/crowd',
-            'pubtkt-foo', 'UkyecUfzeymKivUcunye')
-    print c.request('user', username='lars')
+    try:
+        c = Crowd('https://id.seas.harvard.edu/crowd',
+                'pubtkt-foo', 'UkyecUfzeymKivUcunye')
+        print c.request('user', username=sys.argv[1])
+    except CrowdError, detail:
+        print 'Response:', detail.resp
+        print 'Content:', detail.content
+        raise
+

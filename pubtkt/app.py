@@ -45,7 +45,7 @@ class App (object):
         api = crowd.Crowd(cherrypy.request.config['pubtkt']['crowd_server'],
                 crowdapp['crowd_name'], crowdapp['crowd_pass']
                 )
-        groups = api.request('user/group/nested', username=user)
+        resp,groups = api.request('user/group/nested', username=user)
 
         tokens = [x['name'] for x in groups.get('groups', [])]
 
