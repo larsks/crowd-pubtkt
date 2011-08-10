@@ -32,8 +32,14 @@ class App (object):
         templ.expand(tales, text)
         return text.getvalue()
 
+    def error500(self, status, message, traceback, version):
+        return self.render('error500', status=status, message=message)
+
+    def error404(self, status, message, traceback, version):
+        return self.render('error404', status=status, message=message)
+
     def login(self, app=None, back=None):
-        user = cherrypy.request.headers.get['X-Remote-User']
+        user = cherrypy.request.headers['X-Remote-User']
 
         crowdapp = cherrypy.request.config['crowd:%s' % app]
         api = crowd.Crowd(cherrypy.request.config['pubtkt']['crowd_server'],
@@ -80,7 +86,9 @@ class App (object):
 
         global_conf = {
             '/': {
-                'request.dispatch': self.setup_routes()
+                'request.dispatch': self.setup_routes(),
+                'error_page.default': self.error500,
+                'error_page.404': self.error404,
                 }}
 
         app = cherrypy.tree.mount(None, config=global_conf)

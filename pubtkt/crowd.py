@@ -26,10 +26,7 @@ class Crowd (object):
                 self.apiname,
                 self.apiversion,
                 method, qs)
-        print 'url:', url
         resp, content = self.client.request(url)
-        print resp
-        print content
         return json.loads(content)
 
 if __name__ == '__main__':
