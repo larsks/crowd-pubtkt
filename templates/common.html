@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
+"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.w3.org/MarkUp/SCHEMA/xhtml11.xsd"
+  xml:lang="en"
+  metal:define-macro="page">
+  <head>
+
+    <title>SEAS Weblogin: <metal:block define-slot="title"
+      >title</metal:block></title>
+    <link rel="stylesheet" href="/static/css/common.css" />
+
+  </head>
+
+  <body>
+    <div id="wrapper">
+
+      <div id="logo">
+        <img src="/static/images/logo.png" width="491" height="168" />
+      </div>
+
+      <div id="content">
+        <h1>SEAS Weblogin: <metal:block define-slot="title"
+          >title</metal:block></h1>
+
+        <div id="alert" tal:condition="alert|nothing"
+          tal:content="structure alert">
+          (optional alert message goes here)
+        </div>
+
+        <metal:block define-slot="content">
+        <p>Content goes here.</p>
+        </metal:block>
+      </div>
+
+      <div id="footer">
+        <div>
+          <div id="authwarn">
+            This system is for use only by authorized
+            members of the Harvard University School of Engineering
+            and Applied Sciences.
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
+

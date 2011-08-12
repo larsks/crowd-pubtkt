@@ -1,0 +1,7 @@
+<div metal:use-macro="common/macros/page">
+	<metal:block metal:fill-slot="title">Error <span tal:replace="status">000</span></metal:block>
+
+	<div id="content" metal:fill-slot="content">
+		<p tal:content="message">An unexpected error has occurred.</p>
+	</div>
+</div>

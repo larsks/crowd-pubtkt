@@ -4,17 +4,16 @@
 <html xmlns="http://www.w3.org/1999/xhtml"
 	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 	xsi:schemaLocation="http://www.w3.org/MarkUp/SCHEMA/xhtml11.xsd"
-  xml:lang="en"
-  metal:use-macro="common/macros/page">
+	xml:lang="en"
+	metal:use-macro="common/macros/page">
 	<head>            
-    <title><metal:block meta:fill-slot="title">Logged out</metal:block></title>
+		<title><metal:block metal:fill-slot="title">Login Successful</metal:block></title>
 	</head>
 	<body>
-
-    <div id="content" metal:fill-slot="content">
-      You have been logged out.
-    </div>
-
+		<div id="content" metal:fill-slot="content">
+			You have successfully logged in as 
+			<span tal:replace="user">username</span>.
+		</div>
 	</body>
 </html>
 

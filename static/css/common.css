@@ -1,0 +1,48 @@
+body {
+	background: #990000;
+	font-family: Verdana, Arial, Helvetica, sans-serif;
+}
+
+h1 {
+	font-size: smaller;
+}
+
+#wrapper {
+	width: 491px;
+	margin-left: auto;
+	margin-right: auto;
+	border: thin solid black;
+	background: white;
+}
+
+#content {
+	padding-left: 1ex;
+	padding-right: 1ex;
+}
+
+#message {
+	margin-top: 2ex;
+	margin-bottom: 2ex;
+	background: red;
+	padding: 1ex;
+	font-weight: bold;
+}
+
+#loginform {
+}
+
+#loginform table td {
+	padding: 1ex;
+}
+
+#authwarn {
+	border-top: thin solid black;
+	color: red;
+	background: #d0d0d0;
+	padding: 1ex;
+}
+
+.label {
+	font-weight: bold;
+}
+

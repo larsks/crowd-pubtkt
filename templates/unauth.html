@@ -4,11 +4,13 @@
 <html xmlns="http://www.w3.org/1999/xhtml"
 	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 	xsi:schemaLocation="http://www.w3.org/MarkUp/SCHEMA/xhtml11.xsd"
-	xml:lang="en">
+  xml:lang="en"
+  metal:use-macro="common/macros/page">
 	<head>            
-		<title>Unauthorized access</title>
+    <title><metal:block metal:fill-slot="title">Unauthorized access</metal:block></title>
 	</head>
 	<body>
+    <div id="content" metal:fill-slot="content">
 		<p>You have attempted to access a resource for which you are
 		not authorized:</p>
 
@@ -16,6 +18,7 @@
 
 		<p>Contact the resource owner for more information or to 
 		establish the proper authorization.</p>
+  </div>
 	</body>
 </html>
 
