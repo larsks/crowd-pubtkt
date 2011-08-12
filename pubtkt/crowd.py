@@ -24,15 +24,33 @@ class Crowd (object):
                 disable_ssl_certificate_validation=novalidate)
         self.client.add_credentials(self.crowd_name, self.crowd_pass)
 
-    def request(self, uri, **params):
+    def request(self, uri, postdata=None, **params):
+        # Turn the params dictionary into a query string,
         qs = '&'.join(['%s=%s' % (urllib.quote(k), urllib.quote(v)) for
             (k,v) in params.items()])
+
         url = '%s/rest/%s/%s/%s.json?%s' % (
                 self.baseurl,
                 self.apiname,
                 self.apiversion,
                 uri, qs)
-        resp,content = self.client.request(url)
+
+        if postdata is not None:
+            method = 'POST'
+            headers = {'Content-type': 'application/json'}
+            body = json.dumps(postdata)
+        else:
+            method = 'GET'
+            headers = {}
+            body = None
+
+        print 'REQUEST:', method, url
+        if body is not None:
+            print 'BODY:'
+            print body
+
+        resp,content = self.client.request(url, method,
+                headers=headers, body=body)
 
         if resp['content-type'] != 'application/json':
             raise CrowdError('Did not receive JSON response.',
@@ -41,21 +59,9 @@ class Crowd (object):
         return resp['status'], json.loads(content)
 
     def authenticate(self, user, password):
-        qs = urllib.quote(user)
-        url = '%s/rest/%s/%s/authentication.json?username=%s' % (
-                self.baseurl,
-                self.apiname,
-                self.apiversion,
-                qs)
-        headers = {'Content-type': 'application/json'}
-        resp,content = self.client.request(url, 'POST',
-                headers=headers, body=json.dumps({'value': password}))
-
-        if resp['content-type'] != 'application/json':
-            raise CrowdError('Did not receive JSON response.',
-                    resp=resp, content=content)
-
-        return resp['status'], json.loads(content)
+        return self.request('authenticate',
+                postdata={ 'value': password },
+                username=user)
 
 if __name__ == '__main__':
     import sys
