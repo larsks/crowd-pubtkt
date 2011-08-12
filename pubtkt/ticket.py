@@ -3,12 +3,16 @@ import base64
 import datetime
 import time
 
+import M2Crypto
 from M2Crypto import RSA
 
 class TicketError(Exception):
     pass
 
 class MissingFieldError (TicketError):
+    pass
+
+class BadSignatureError (TicketError):
     pass
 
 def split_token(tok):
@@ -19,15 +23,17 @@ class Ticket (dict):
     def __init__(self, ticket=None, *args, **kwargs):
         super(Ticket, self).__init__(*args, **kwargs)
 
+        #       field           xform_out       xform_in    required
         self.fields = [
-                ('uid',	        str,	        True),
-                ('validuntil',	self.parsedate,	True),
-                ('cip',	        str,        	False),
+                ('uid',	        str,	        str,        True),
+                ('validuntil',	self.parsedate,	int,        True),
+                ('cip',	        str,        	str,        False),
                 ('tokens',	    lambda x: ','.join(x),
+                                                lambda x: x.split(','),
                                                 False),
-                ('udata',	    str,	        False),
-                ('graceperiod',	self.parsedate,	False),
-                ('sig',         str,            False),
+                ('udata',	    str,	        str,        False),
+                ('graceperiod',	self.parsedate,	int,        False),
+                ('sig',         str,            str,        False),
                 ]
 
         if ticket is not None:
@@ -41,7 +47,16 @@ class Ticket (dict):
 
     def from_string (self, ticket):
         self.update(split_token(ticket))
-        self['tokens'] = self.get('tokens', '').split(',')
+
+        for fspec in self.fields:
+            if fspec[3] and not fspec[0] in self:
+                raise MissingFieldError('missing required field: %s' %
+                        fspec[0])
+            elif fspec[0] in self:
+                self[fspec[0]] = fspec[2](self[fspec[0]])
+
+    def freeze (self):
+        self.from_string(self.to_string())
 
     def parsedate(self, d):
         if isinstance(d, datetime.timedelta):
@@ -52,11 +67,14 @@ class Ticket (dict):
 
         return int(d)
 
-    def ticket (self):
+    def to_string (self, sig=False):
         dtok = []
 
         for fspec in self.fields:
-            if fspec[2] and not fspec[0] in self:
+            if fspec[0] == 'sig' and not sig:
+                continue
+
+            if fspec[3] and not fspec[0] in self:
                 raise MissingFieldError('missing required field: %s' %
                         fspec[0])
             elif fspec[0] in self:
@@ -70,18 +88,44 @@ class Ticket (dict):
         if isinstance(privkey, str):
             privkey = RSA.load_key(privkey)
 
-        stok = self.ticket()
-
-        dgst = hashlib.sha1(stok).digest()
+        tok = self.to_string()
+        dgst = hashlib.sha1(tok).digest()
         sig = privkey.sign(dgst, 'sha1')
         sig = base64.b64encode(sig)
 
         self['sig'] = sig
 
+    def verify(self, pubkey):
+        if isinstance(pubkey, str):
+            pubkey = RSA.load_pub_key(pubkey)
+
+        tok = self.to_string()
+        dgst = hashlib.sha1(tok).digest()
+        sig = base64.b64decode(self['sig'])
+
+        try:
+            return pubkey.verify(dgst, sig, 'sha1')
+        except M2Crypto.RSA.RSAError, detail:
+            raise BadSignatureError(detail)
+
     def __str__ (self):
-        return self.ticket()
+        return self.to_string()
 
 if __name__ == '__main__':
     t1 = Ticket(uid='lars', validuntil=datetime.timedelta(hours=1),
             tokens=['one', 'two', 'three'])
+    t1.freeze()
+
+    print 'sign'
+    t1.sign('privkey.pem')
+
+    print 'verify'
+    if t1.verify('pubkey.pem'):
+        print 'good sig'
+    else:
+        print 'bad sig'
+
+    print 'invalidating token'
+    t1['uid'] = 'bad'
+    t1.verify('pubkey.pem')
 
