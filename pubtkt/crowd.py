@@ -10,9 +10,21 @@ class CrowdError (Exception):
 
 class Crowd (object):
 
+    '''Wraps the Crowd REST API in some convenience
+    functions.'''
+
     def __init__ (self, baseurl, crowd_name, crowd_pass, 
             apiname='usermanagement', apiversion='latest',
             novalidate=True):
+
+        '''baseurl -- base URL of the Crowd instance
+        crowd_name -- crowd application name
+        crowd_pass -- crowd application password
+        apiname -- name of the api ("usermanagement")
+        apiversion -- api version ("latest")
+        novalidate -- True to disable certificate validation
+                      for SSL connections (True).
+        '''
 
         self.baseurl = baseurl
         self.apiname = apiname
@@ -24,30 +36,27 @@ class Crowd (object):
                 disable_ssl_certificate_validation=novalidate)
         self.client.add_credentials(self.crowd_name, self.crowd_pass)
 
-    def request(self, uri, postdata=None, **params):
+    def __str__ (self):
+        return '<Crowd %s>' % self.crowd_name
+
+    def request(self, uri, method='GET', postdata=None, **params):
         # Turn the params dictionary into a query string,
         qs = '&'.join(['%s=%s' % (urllib.quote(k), urllib.quote(v)) for
             (k,v) in params.items()])
 
+        # Build the complete URL from all the pieces.
         url = '%s/rest/%s/%s/%s.json?%s' % (
                 self.baseurl,
                 self.apiname,
                 self.apiversion,
                 uri, qs)
 
+        body = None
+        headers = {'Content-type': 'application/json'}
+
         if postdata is not None:
             method = 'POST'
-            headers = {'Content-type': 'application/json'}
             body = json.dumps(postdata)
-        else:
-            method = 'GET'
-            headers = {}
-            body = None
-
-        print 'REQUEST:', method, url
-        if body is not None:
-            print 'BODY:'
-            print body
 
         resp,content = self.client.request(url, method,
                 headers=headers, body=body)
@@ -59,19 +68,48 @@ class Crowd (object):
         return resp['status'], json.loads(content)
 
     def authenticate(self, user, password):
-        return self.request('authenticate',
+        '''Authenticate a username and password.'''
+        return self.request('authentication',
                 postdata={ 'value': password },
                 username=user)
 
 if __name__ == '__main__':
     import sys
 
-    try:
-        c = Crowd('https://id.seas.harvard.edu/crowd',
-                'pubtkt-foo', 'UkyecUfzeymKivUcunye')
-        print c.request('user', username=sys.argv[1])
-    except CrowdError, detail:
-        print 'Response:', detail.resp
-        print 'Content:', detail.content
-        raise
+    cfoo = Crowd('https://id.seas.harvard.edu/crowd',
+            'pubtkt-foo', 'UkyecUfzeymKivUcunye')
+    cbar = Crowd('https://id.seas.harvard.edu/crowd',
+            'pubtkt-bar', 'rovHeyftEgaikFoohyk2')
+
+    print 'AUTHENTICATE'
+    print '=' * 75
+    for app in [cfoo, cbar]:
+        for user in [['joeuser', 'hello'], ['janeuser', 'goodbye']]:
+            res, content = app.authenticate(*user)
+            print app, 'as', user[0], res
+
+    print 'CREATE SESSION'
+    print '=' * 75
+    res, s1 = cfoo.request('session', postdata={
+        'username': 'joeuser', 'password': 'hello'})
+    print cfoo, 'as', 'joeuser', res, s1.get('token', '<NONE>') 
+    res, s2 = cfoo.request('session', postdata={
+        'username': 'janeuser', 'password': 'goodbye'})
+    print cfoo, 'as', 'janeuser', res, s2.get('token', '<NONE>') 
+
+    res, s3 = cbar.request('session', postdata={
+        'username': 'joeuser', 'password': 'hello'})
+    print cbar, 'as', 'joeuser', res, s3.get('token', '<NONE>') 
+    res, s4 = cbar.request('session', postdata={
+        'username': 'janeuser', 'password': 'goodbye'})
+    print cbar, 'as', 'janeuser', res, s4.get('token', '<NONE>') 
+
+    print 'VALIDATE SESSION'
+    print '=' * 75
+    res, v1 = cfoo.request('session/%s' % s2['token'],
+            postdata = {})
+    print cfoo, 'as', s2['user']['name'], res
+    res, v2 = cfoo.request('session/%s' % s3['token'],
+            postdata = {})
+    print cfoo, 'as', s3['user']['name'], res
 
