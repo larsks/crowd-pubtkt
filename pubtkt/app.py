@@ -23,7 +23,12 @@ class App (object):
         return self.pages.render('error', macros=['common'],
                 status=status, message=message)
 
-    def get_api_object(self, crowdapp):
+    def get_api_object(self, app):
+        '''Creates a new crowd.Crowd object using the
+        configuration appropriate to the current request.'''
+
+        crowdapp = cherrypy.request.config['crowd:%s' % app]
+
         crowd_server = cherrypy.request.config['pubtkt']['crowd_server']
         if crowd_server.endswith('/'):
             crowd_server = crowd_server[:-1]
@@ -34,16 +39,63 @@ class App (object):
 
         return api
 
-    def login(self, app=None, back=None):
-        cherrypy.request.crowdapp = cherrypy.request.config['crowd:%s' % app]
-        cherrypy.request.crowdapi = self.get_api_object(crowdapp)
+    def login(self, app, back=None, user=None, password=None,
+            submit=None, alert=None):
 
-        # Is there a pubtkt cookie?
+        cherrypy.request.crowdapi = self.get_api_object(app)
+
         if self.preauth():
             return self.set_cookie_and_redirect()
 
+        # If we have both 
+        if user and password:
+            if self.authenticate(user, password):
+                return self.set_cookie_and_redirect()
+            else:
+                alert = 'Incorrect username or password.'
+        elif user or password or submit:
+            alert = 'You must specify both a username and password.'
+
+        return self.loginform(alert=alert)
+
+    def loginform(self, alert=None):
+        return self.pages.render('login',
+                macros=['common'],
+                alert=alert,
+                params=cherrypy.request.params,
+                request=cherrypy.request)
+
+    def authenticate(self, user, password):
+        res, userinfo = cherrypy.request.crowdapi.authenticate(user, password)
+
+        print 'AUTHENTICATE', user, res
+
+        if res != '200':
+            return False
+
+        print 'AUTHENTICATE', 'good password'
+
+        if not userinfo['active']:
+            return False
+
+        print 'AUTHENTICATE', 'user active'
+
+        # Get session token from Crowd.
+        res, session = cherrypy.request.crowdapi.create_session(
+                user, password)
+        print 'SESSION', res
+        if res != '201':
+            return self.loginform(alert='Failed to establish new session.')
+        cherrypy.request.crowd_token = session['token']
+
+        cherrypy.request.crowd_user = user
+
+        return True
+
     def preauth (self):
         if self.cookiename in cherrypy.request.cookie:
+            print 'PREAUTH'
+
             cookie = cherrypy.request.cookie[self.cookiename]
 
             try:
@@ -51,38 +103,63 @@ class App (object):
                 pubtkt = ticket.Ticket(
                         urllib.unquote(cookie.value))
                 cherrypy.request.pubtkt = pubtkt
+                print 'PREAUTH TICKET:', pubtkt
 
                 # Check signature (ticket.BadSignatureError on failure)
                 pubtkt.verify(self.pubkey)
+                print 'PREAUTH VERIFIED'
 
                 # Has ticket expired?
                 if pubtkt['validuntil'] < time.time():
                     return False
+                print 'PREAUTH ACTIVE'
+
+                cherrypy.request.crowd_user = pubtkt['uid']
 
                 # Is Crowd authentication still valid?
-                crowd_token = pubtkt['userdata']
+                crowd_token = pubtkt['udata']
+                res, data = cherrypy.request.crowdapi.verify_session(crowd_token)
+                print 'PREAUTH RES:', res
+
+                cherrypy.request.crowd_token = crowd_token
+                return res == '200'
+
             except ticket.TicketError:
                 pass
 
         return False
 
     def set_cookie_and_redirect (self):
-        resp,groups = api.request('user/group/nested', username=user)
+        user = cherrypy.request.crowd_user
 
-        tokens = [x['name'] for x in groups.get('groups', [])]
+        # Get groups from Crowd.
+        res,groups = cherrypy.request.crowdapi.request(
+                'user/group/nested', username=user)
+        groups = [x['name'] for x in groups.get('groups', [])]
 
-        tkt = ticket.Ticket(self.privkey, uid=user,
+        tkt = ticket.Ticket(uid=user,
                 validuntil = self.validuntil,
-                tokens = tokens,
+                tokens = groups,
+                udata = cherrypy.request.crowd_token,
                 graceperiod = self.graceperiod)
 
-        cherrypy.response.cookie[self.cookiename] = str(tkt)
+        tkt.sign(self.privkey)
+        print tkt.to_string(sig=True)
+
+        cherrypy.response.cookie[self.cookiename] = urllib.quote(
+                tkt.to_string(sig=True))
         
-        if back is not None:
+        back = cherrypy.request.params.get('back')
+        if back:
+            print 'REDIRECT', back
             raise cherrypy.HTTPRedirect(back)
         else:
-            return self.pages.render('login', macros=['common'],
-                    user=user, tokens=tokens)
+            print 'CONFIRM'
+            return self.pages.render('loginok',
+                    macros=['common'],
+                    user=user,
+                    params=cherrypy.request.params,
+                    request=cherrypy.request)
 
     def logout(self, app=None, back=None):
         cherrypy.response.cookie[self.cookiename] = ''
