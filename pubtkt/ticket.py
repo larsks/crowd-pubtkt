@@ -56,6 +56,8 @@ class Ticket (dict):
                 self[fspec[0]] = fspec[2](self[fspec[0]])
 
     def freeze (self):
+        '''Makes sure that dynamic values (like datetime.timedelta) get
+        turned into static values.'''
         self.from_string(self.to_string())
 
     def parsedate(self, d):
@@ -88,6 +90,10 @@ class Ticket (dict):
         if isinstance(privkey, str):
             privkey = RSA.load_key(privkey)
 
+        # If we're signing the ticket, we need to make sure
+        # it won't change.
+        self.freeze()
+
         tok = self.to_string()
         dgst = hashlib.sha1(tok).digest()
         sig = privkey.sign(dgst, 'sha1')
@@ -113,11 +119,15 @@ class Ticket (dict):
 
 if __name__ == '__main__':
     t1 = Ticket(uid='lars', validuntil=datetime.timedelta(hours=1),
-            tokens=['one', 'two', 'three'])
-    t1.freeze()
+            tokens=['one', 'two', 'three'],
+            udata='This is some random user data.')
+
+    print 'created token'
+    print t1.to_string()
 
     print 'sign'
     t1.sign('privkey.pem')
+    time.sleep(1)
 
     print 'verify'
     if t1.verify('pubkey.pem'):
