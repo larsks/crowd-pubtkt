@@ -39,7 +39,7 @@ class Crowd (object):
     def __str__ (self):
         return '<Crowd %s>' % self.crowd_name
 
-    def request(self, uri, method='GET', postdata=None, **params):
+    def request(self, uri, method='GET', postdata=None, debug=False, **params):
         # Turn the params dictionary into a query string,
         qs = '&'.join(['%s=%s' % (urllib.quote(k), urllib.quote(v)) for
             (k,v) in params.items()])
@@ -58,6 +58,12 @@ class Crowd (object):
             method = 'POST'
             body = json.dumps(postdata)
 
+        if debug:
+            print '=== DEBUG ==='
+            print 'URL:', url
+            print 'BODY:', body
+            print '=== DEBUG ==='
+
         resp,content = self.client.request(url, method,
                 headers=headers, body=body)
 
@@ -73,6 +79,35 @@ class Crowd (object):
                 postdata={ 'value': password },
                 username=user)
 
+    def create_session(self, user, password='', factors=None):
+        if not password:
+            uri = 'session/validate-password=false'
+        else:
+            uri = 'session'
+
+        if factors is None:
+            factors = []
+
+        return self.request(uri,
+                postdata={
+                    'username': user,
+                    'password': password,
+                    'validation-factors': {
+                        'validationFactors': factors
+                        }
+                    }
+                )
+
+    def verify_session(self, token, factors=None):
+        if factors is None:
+            factors = []
+
+        return self.request('session/%s' % token,
+                postdata = {
+                    'validationFactors': factors
+                    }
+                )
+
 if __name__ == '__main__':
     import sys
 
@@ -84,18 +119,20 @@ if __name__ == '__main__':
     print 'AUTHENTICATE'
     print '=' * 75
     for app in [cfoo, cbar]:
-        for user in [['joeuser', 'hello'], ['janeuser', 'goodbye']]:
+        for user in [['joeuser', 'hello'], ['joeuser', 'badpass'], ['janeuser', 'goodbye']]:
             res, content = app.authenticate(*user)
             print app, 'as', user[0], res
+            print content
 
     print 'CREATE SESSION'
     print '=' * 75
     res, s1 = cfoo.request('session', postdata={
         'username': 'joeuser', 'password': 'hello'})
     print cfoo, 'as', 'joeuser', res, s1.get('token', '<NONE>') 
-    res, s2 = cfoo.request('session', postdata={
-        'username': 'janeuser', 'password': 'goodbye'})
+    res, s2 = cfoo.create_session('janeuser', 'goodbye',
+            factors=[{'name': 'remote_address', 'value': '127.0.0.1'}])
     print cfoo, 'as', 'janeuser', res, s2.get('token', '<NONE>') 
+    print s2
 
     res, s3 = cbar.request('session', postdata={
         'username': 'joeuser', 'password': 'hello'})
@@ -106,9 +143,10 @@ if __name__ == '__main__':
 
     print 'VALIDATE SESSION'
     print '=' * 75
-    res, v1 = cfoo.request('session/%s' % s2['token'],
-            postdata = {})
+    res, v1 = cfoo.verify_session(s2['token'],
+            factors=[{'name': 'remote_address', 'value': '127.0.0.1'}])
     print cfoo, 'as', s2['user']['name'], res
+    print v1
     res, v2 = cfoo.request('session/%s' % s3['token'],
             postdata = {})
     print cfoo, 'as', s3['user']['name'], res
