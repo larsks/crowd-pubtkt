@@ -290,6 +290,9 @@ class App (object):
                 macros=['common'],
                 **params)
 
+    def default(self):
+        return self.render('notimplemented')
+
     def setup_routes(self):
         d = cherrypy.dispatch.RoutesDispatcher()
 
@@ -298,6 +301,8 @@ class App (object):
         d.connect('unauth', '/:appname/unauth', self.unauth)
         d.connect('login',  '/:appname/login',  self.login)
         d.connect('logout', '/:appname/logout', self.logout)
+
+        d.connect('default', '/', self.default)
 
         return d
 
