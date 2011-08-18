@@ -41,17 +41,23 @@ class Crowd (object):
                 self.crowd_name,
                 self.baseurl)
 
-    def request(self, uri, method='GET', postdata=None, debug=False, **params):
+    def request(self, uri, path_info='', add_json=True, 
+            method='GET', postdata=None, debug=False, **params):
         # Turn the params dictionary into a query string,
         qs = '&'.join(['%s=%s' % (urllib.quote(k), urllib.quote(v)) for
             (k,v) in params.items()])
 
+        if add_json:
+            ext='.json'
+        else:
+            ext=''
+
         # Build the complete URL from all the pieces.
-        url = '%s/rest/%s/%s/%s.json?%s' % (
+        url = '%s/rest/%s/%s/%s%s%s?%s' % (
                 self.baseurl,
                 self.apiname,
                 self.apiversion,
-                uri, qs)
+                uri, ext, path_info, qs)
 
         body = None
         headers = {'Content-type': 'application/json'}
@@ -69,11 +75,13 @@ class Crowd (object):
         resp,content = self.client.request(url, method,
                 headers=headers, body=body)
 
-        if resp['content-type'] != 'application/json':
+        if add_json and resp['content-type'] != 'application/json':
             raise CrowdError('Did not receive JSON response.',
                     resp=resp, content=content)
+        elif add_json:
+            content = json.loads(content)
 
-        return resp['status'], json.loads(content)
+        return resp['status'], content
 
     def authenticate(self, user, password):
         '''Authenticate a username and password.'''
