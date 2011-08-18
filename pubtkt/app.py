@@ -18,6 +18,9 @@ class LoginOK (Exception):
 class LoginFAIL (Exception):
     pass
 
+class LoginPASS (Exception):
+    pass
+
 class App (object):
     cookiename = 'seas_ac_auth'
 
@@ -46,10 +49,30 @@ class App (object):
         cherrypy.request.api = api
 
     def setup_request(self):
+        '''This is called at the start of every request.  It initializes
+        cherrypy.request.ctx and, if possible, initializes
+        the Crowd API objects.'''
+
+        log = self.makelogger('SETUP')
+
         cherrypy.request.ctx = {}
 
         if 'appname' in cherrypy.request.params:
             self.get_api_object(cherrypy.request.params['appname'])
+
+            if self.cookiename in cherrypy.request.cookie:
+                cookie = cherrypy.request.cookie[self.cookiename]
+
+                try:
+                    # Is pubtkt token still valid?
+                    pubtkt = ticket.Ticket(
+                            urllib.unquote(cookie.value))
+                    pubtkt.verify(self.pubkey)
+                    log('Verified signature on pubtkt cookie.')
+                    cherrypy.request.ctx['pubtkt'] = pubtkt
+                    cherrypy.request.ctx['crowd_token'] = pubtkt['udata']
+                except ticket.TicketError:
+                    pass
 
     def login(self, appname, back=None, user=None, password=None,
             submit=None, alert=None):
@@ -60,10 +83,14 @@ class App (object):
         try:
             self.preauth()
             self.authenticate(user, password)
-        except LoginOK:
+        except LoginOK, detail:
+            log('Login okay: %s' % detail)
             return self.set_cookie_and_redirect()
-        except LoginFAIL:
+        except LoginFAIL, detail:
+            log('Login failed: %s' % detail)
             return self.loginform('Bad username or password.')
+        except LoginPASS:
+            pass
 
         return self.loginform()
 
@@ -75,7 +102,7 @@ class App (object):
 
         return self.render('login',
                 alert=alert,
-                appname=cherrypy.request.appconfig['name'],
+                appname=cherrypy.request.appconfig.get('name'),
                 params=cherrypy.request.params,
                 request=cherrypy.request)
 
@@ -86,23 +113,24 @@ class App (object):
         return _
 
     def authenticate(self, user, password):
-        if (user and not password) or (password and not user):
-            raise LoginFAIL()
+        if not (user or password):
+            return
 
         log = self.makelogger('AUTHENTICATE')
         log('Trying to authenticate user %s.' % user)
 
+        if (user and not password) or (password and not user):
+            raise LoginFAIL('Missing username or password.')
+
         res, userinfo = cherrypy.request.api.authenticate(user, password)
 
         if res != '200':
-            log('Authentication via Crowd failed for %s.' % user)
-            raise LoginFAIL()
+            raise LoginFAIL('Crowd authentication failed.')
 
         log('Good password for user %s.' % user)
 
         if not userinfo['active']:
-            log('User %s is not active.' % user)
-            raise LoginFAIL()
+            raise LoginFAIL('User %s is not active.' % user)
 
         log('User %s is active.' % user)
 
@@ -111,11 +139,10 @@ class App (object):
                 user, password)
 
         if res != '201':
-            log('Failed to create new session for user %s.' % user)
-            raise LoginFAIL()
+            raise LoginFAIL('Failed to create new session for %s.' % user)
 
-        cherrypy.request.crowd_token = session['token']
-        cherrypy.request.crowd_user = user
+        cherrypy.request.ctx['crowd_token'] = session['token']
+        cherrypy.request.ctx['auth_user'] = user
 
         log('Successful authentication for user %s.' % user)
         raise LoginOK('AUTHENTICATE')
@@ -129,56 +156,36 @@ class App (object):
                 raise LoginOK('PREAUTH')
 
         log('Could not preauthenticate request.')
-        return False
 
     def verify_pubtkt_cookie(self):
         log = self.makelogger('PREAUTH')
-        if not self.cookiename in cherrypy.request.cookie:
+        if not 'pubtkt' in cherrypy.request.ctx:
             return False
 
         log('Found pubtkt cookie.')
+        pubtkt = cherrypy.request.ctx['pubtkt']
 
-        cookie = cherrypy.request.cookie[self.cookiename]
+        # Has ticket expired?
+        if pubtkt['validuntil'] < time.time():
+            log('Pubtkt cookie has expired.')
+            return False
 
-        try:
-            # Is pubtkt token still valid?
-            pubtkt = ticket.Ticket(
-                    urllib.unquote(cookie.value))
-
-            # save pubtkt in case we want to refer to it later
-            cherrypy.request.ctx['pubtkt'] = pubtkt
-
-            # Check signature (ticket.BadSignatureError on failure)
-            pubtkt.verify(self.pubkey)
-            log('Verified signature on pubtkt cookie.')
-
-            # Has ticket expired?
-            if pubtkt['validuntil'] < time.time():
-                log('Pubtkt cookie has expired.')
-                return False
-
-            cherrypy.request.ctx['pubtkt_valid'] = True
-            log('Pubtkt cookie is active.')
-
-            return True
-        except ticket.TicketError:
-            pass
-
-        return False
+        log('Pubtkt cookie is active.')
+        return True
 
     def verify_crowd_token(self):
         log = self.makelogger('PREAUTH')
 
         # Is Crowd authentication still valid?
-        crowd_token = cherrypy.request.ctx['pubtkt']['udata']
-        res, data = cherrypy.request.api.verify_session(crowd_token)
+        res, data = cherrypy.request.api.verify_session(
+                cherrypy.request.ctx['crowd_token'])
 
         if res != '200':
             log('Crowd token is not valid.')
             return False
 
         log('Crowd token is valid.')
-        cherrypy.request.ctx['crowd_token'] = crowd_token
+        cherrypy.request.ctx['auth_user'] = data['user']['name']
         return True
 
     def set_cookie_and_redirect (self):
@@ -191,12 +198,12 @@ class App (object):
             raise cherrypy.HTTPRedirect(back)
         else:
             return self.render('loginok',
-                    user=cherrypy.request.crowd_user,
+                    user=cherrypy.request.ctx['auth_user'],
                     params=cherrypy.request.params,
                     request=cherrypy.request)
 
     def set_pubtkt_cookie(self):
-        user = cherrypy.request.ctx['crowd_user']
+        user = cherrypy.request.ctx['auth_user']
 
         # Get groups from Crowd.
         res,groups = cherrypy.request.api.request(
@@ -206,7 +213,7 @@ class App (object):
         tkt = ticket.Ticket(uid=user,
                 validuntil = self.validuntil,
                 tokens = groups,
-                udata = cherrypy.request.crowd_token,
+                udata = cherrypy.request.ctx['crowd_token'],
                 graceperiod = self.graceperiod)
 
         tkt.sign(self.privkey)
@@ -222,7 +229,8 @@ class App (object):
 
     def set_crowd_cookie(self):
         cookie = cherrypy.request.api.request('config/cookie')
-        cherrypy.response.cookie[cookie[1]['name']] = cherrypy.request.crowd_token
+        cherrypy.response.cookie[cookie[1]['name']] = \
+                cherrypy.request.ctx['crowd_token']
         cherrypy.response.cookie[cookie[1]['name']]['path'] = '/'
 #        cherrypy.response.cookie[cookie[1]['name']]['domain'] = \
 #                cookie[1]['domain']
@@ -235,7 +243,18 @@ class App (object):
 #        cherrypy.response.cookie[cookie[1]['name']]['domain'] = \
 #                cookie[1]['domain']
 
+    def invalidate_crowd_session(self):
+        log = self.makelogger('LOGOUT')
+
+        if 'crowd_token' in cherrypy.request.ctx:
+            token = cherrypy.request.ctx['crowd_token']
+            res, data = cherrypy.request.api.request(
+                    'session', path_info='/%s' % token, 
+                    add_json=False, method='DELETE')
+            log('Invalidated Crowd session (%s)' % res)
+
     def logout(self, appname, back=None):
+        self.invalidate_crowd_session()
         self.delete_crowd_cookie()
         self.delete_pubtkt_cookie()
         return self.render('logout', back=back)
