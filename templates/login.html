@@ -2,18 +2,37 @@
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
 "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml"
-	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-	xsi:schemaLocation="http://www.w3.org/MarkUp/SCHEMA/xhtml11.xsd"
-	xml:lang="en"
-	metal:use-macro="common/macros/page">
-	<head>            
-		<title><metal:block metal:fill-slot="title">Login Successful</metal:block></title>
-	</head>
-	<body>
-		<div id="content" metal:fill-slot="content">
-			You have successfully logged in as 
-			<span tal:replace="user">username</span>.
-		</div>
-	</body>
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.w3.org/MarkUp/SCHEMA/xhtml11.xsd"
+  xml:lang="en"
+  metal:use-macro="common/macros/page">
+  <head>            
+    <title><metal:block metal:fill-slot="title">Login to <span tal:replace="appname"/></metal:block></title>
+  </head>
+  <body>
+    <div id="content" metal:fill-slot="content">
+      <form id="loginform" method="post" action="login">
+        <input type="hidden" name="back" 
+          tal:attributes="value params/back"/>
+
+        <table>
+          <tr>
+            <td><span class="label">Username:</span></td>
+            <td><input type="text" name="user" 
+              tal:attributes="value params/user"/></td>
+          </tr>
+          <tr>
+            <td><span class="label">Password:</span></td>
+            <td><input type="password" name="password" /></td>
+
+          </tr>
+          <tr>
+            <td><input type="submit" name="submit" value="Login" /></td>
+            <td></td>
+          </tr>
+        </table>
+      </form>
+    </div>
+  </body>
 </html>
 

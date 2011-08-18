@@ -3,7 +3,6 @@ import base64
 import datetime
 import time
 
-import M2Crypto
 from M2Crypto import RSA
 
 class TicketError(Exception):
@@ -111,7 +110,7 @@ class Ticket (dict):
 
         try:
             return pubkey.verify(dgst, sig, 'sha1')
-        except M2Crypto.RSA.RSAError, detail:
+        except RSA.RSAError, detail:
             raise BadSignatureError(detail)
 
     def __str__ (self):

@@ -39,6 +39,11 @@ class PageCache (dict):
         return v
 
     def __getitem__ (self, k):
+        '''Return a compiled template.  If the template on disk
+        has not been modified since we last read it, return the
+        cached version; otherwise recompile the template by
+        calling self.load().'''
+
         try:
             v = super(PageCache, self).__getitem__(k)
             if os.stat(v['path']).st_mtime > v['mtime']:
@@ -55,14 +60,26 @@ class PageCache (dict):
         return v['template']
 
 class Pages (object):
+    '''A class for rendering page templates.'''
 
-    def __init__ (self, templatedir):
+    def __init__ (self, templatedir, **ctxvals):
         self.cache = PageCache(templatedir)
+        self.globals = ctxvals
+
+    def compile(self, page):
+        '''Return the compiled version of a template.'''
+        return self.cache[page]
+
+    def setGlobalContext(self, k, v):
+        self.globals[k] = v
 
     def render (self, page, macros=None, **ctxvals):
+        '''Render a template to HTML (and return the HTML as
+        a string.'''
+
         ctx = simpleTALES.Context()
 
-        for k,v in ctxvals.items():
+        for k,v in self.globals.items() + ctxvals.items():
             ctx.addGlobal(k, v)
 
         if macros is not None:
@@ -72,4 +89,8 @@ class Pages (object):
         buf = StringIO()
         self.cache[page].expand(ctx, buf)
         return buf.getvalue()
+
+if __name__ == '__main__':
+
+    p = Pages('templates')
 

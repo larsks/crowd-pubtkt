@@ -5,13 +5,18 @@ import pprint
 import urllib
 import time
 
-from M2Crypto import RSA
 import cherrypy
 
 import app
 import ticket
 import crowd
 import pages
+
+class LoginOK (Exception):
+    pass
+
+class LoginFAIL (Exception):
+    pass
 
 class App (object):
     cookiename = 'seas_ac_auth'
@@ -20,120 +25,181 @@ class App (object):
         self.config = config
 
     def error(self, status, message, traceback, version):
-        return self.pages.render('error', macros=['common'],
+        return self.render('error', 
                 status=status, message=message)
 
-    def get_api_object(self, app):
+    def get_api_object(self, appname):
         '''Creates a new crowd.Crowd object using the
         configuration appropriate to the current request.'''
 
-        crowdapp = cherrypy.request.config['crowd:%s' % app]
+        appconfig = cherrypy.request.config['crowd:%s' % appname]
 
         crowd_server = cherrypy.request.config['pubtkt']['crowd_server']
         if crowd_server.endswith('/'):
             crowd_server = crowd_server[:-1]
 
         api = crowd.Crowd(crowd_server,
-                crowdapp['crowd_name'], crowdapp['crowd_pass']
+                appconfig['crowd_name'], appconfig['crowd_pass']
                 )
 
-        return api
+        cherrypy.request.appconfig = appconfig
+        cherrypy.request.api = api
 
-    def login(self, app, back=None, user=None, password=None,
+    def setup_request(self):
+        cherrypy.request.ctx = {}
+
+        if 'appname' in cherrypy.request.params:
+            self.get_api_object(cherrypy.request.params['appname'])
+
+    def login(self, appname, back=None, user=None, password=None,
             submit=None, alert=None):
 
-        cherrypy.request.crowdapi = self.get_api_object(app)
+        log = self.makelogger('LOGIN')
+        log('Login request to %s by %s.' % (appname, user))
 
-        if self.preauth():
+        try:
+            self.preauth()
+            self.authenticate(user, password)
+        except LoginOK:
             return self.set_cookie_and_redirect()
+        except LoginFAIL:
+            return self.loginform('Bad username or password.')
 
-        # If we have both 
-        if user and password:
-            if self.authenticate(user, password):
-                return self.set_cookie_and_redirect()
-            else:
-                alert = 'Incorrect username or password.'
-        elif user or password or submit:
-            alert = 'You must specify both a username and password.'
-
-        return self.loginform(alert=alert)
+        return self.loginform()
 
     def loginform(self, alert=None):
-        return self.pages.render('login',
-                macros=['common'],
+        if not cherrypy.request.params.get('user'):
+            if 'pubtkt' in cherrypy.request.ctx:
+                user = cherrypy.request.ctx['pubtkt']['uid']
+                cherrypy.request.params['user'] = user
+
+        return self.render('login',
                 alert=alert,
+                appname=cherrypy.request.appconfig['name'],
                 params=cherrypy.request.params,
                 request=cherrypy.request)
 
-    def authenticate(self, user, password):
-        res, userinfo = cherrypy.request.crowdapi.authenticate(user, password)
+    def makelogger(self, context):
+        def _ (*args, **kwargs):
+            kwargs['context'] = context
+            return cherrypy.request.app.log(*args, **kwargs)
+        return _
 
-        print 'AUTHENTICATE', user, res
+    def authenticate(self, user, password):
+        if (user and not password) or (password and not user):
+            raise LoginFAIL()
+
+        log = self.makelogger('AUTHENTICATE')
+        log('Trying to authenticate user %s.' % user)
+
+        res, userinfo = cherrypy.request.api.authenticate(user, password)
 
         if res != '200':
-            return False
+            log('Authentication via Crowd failed for %s.' % user)
+            raise LoginFAIL()
 
-        print 'AUTHENTICATE', 'good password'
+        log('Good password for user %s.' % user)
 
         if not userinfo['active']:
-            return False
+            log('User %s is not active.' % user)
+            raise LoginFAIL()
 
-        print 'AUTHENTICATE', 'user active'
+        log('User %s is active.' % user)
 
         # Get session token from Crowd.
-        res, session = cherrypy.request.crowdapi.create_session(
+        res, session = cherrypy.request.api.create_session(
                 user, password)
-        print 'SESSION', res
-        if res != '201':
-            return self.loginform(alert='Failed to establish new session.')
-        cherrypy.request.crowd_token = session['token']
 
+        if res != '201':
+            log('Failed to create new session for user %s.' % user)
+            raise LoginFAIL()
+
+        cherrypy.request.crowd_token = session['token']
         cherrypy.request.crowd_user = user
 
-        return True
+        log('Successful authentication for user %s.' % user)
+        raise LoginOK('AUTHENTICATE')
 
     def preauth (self):
-        if self.cookiename in cherrypy.request.cookie:
-            print 'PREAUTH'
+        log = self.makelogger('PREAUTH')
+        log('Starting preauth.')
 
-            cookie = cherrypy.request.cookie[self.cookiename]
+        if self.verify_pubtkt_cookie():
+            if self.verify_crowd_token():
+                raise LoginOK('PREAUTH')
 
-            try:
-                # Is pubtkt token still valid?
-                pubtkt = ticket.Ticket(
-                        urllib.unquote(cookie.value))
-                cherrypy.request.pubtkt = pubtkt
-                print 'PREAUTH TICKET:', pubtkt
+        log('Could not preauthenticate request.')
+        return False
 
-                # Check signature (ticket.BadSignatureError on failure)
-                pubtkt.verify(self.pubkey)
-                print 'PREAUTH VERIFIED'
+    def verify_pubtkt_cookie(self):
+        log = self.makelogger('PREAUTH')
+        if not self.cookiename in cherrypy.request.cookie:
+            return False
 
-                # Has ticket expired?
-                if pubtkt['validuntil'] < time.time():
-                    return False
-                print 'PREAUTH ACTIVE'
+        log('Found pubtkt cookie.')
 
-                cherrypy.request.crowd_user = pubtkt['uid']
+        cookie = cherrypy.request.cookie[self.cookiename]
 
-                # Is Crowd authentication still valid?
-                crowd_token = pubtkt['udata']
-                res, data = cherrypy.request.crowdapi.verify_session(crowd_token)
-                print 'PREAUTH RES:', res
+        try:
+            # Is pubtkt token still valid?
+            pubtkt = ticket.Ticket(
+                    urllib.unquote(cookie.value))
 
-                cherrypy.request.crowd_token = crowd_token
-                return res == '200'
+            # save pubtkt in case we want to refer to it later
+            cherrypy.request.ctx['pubtkt'] = pubtkt
 
-            except ticket.TicketError:
-                pass
+            # Check signature (ticket.BadSignatureError on failure)
+            pubtkt.verify(self.pubkey)
+            log('Verified signature on pubtkt cookie.')
+
+            # Has ticket expired?
+            if pubtkt['validuntil'] < time.time():
+                log('Pubtkt cookie has expired.')
+                return False
+
+            cherrypy.request.ctx['pubtkt_valid'] = True
+            log('Pubtkt cookie is active.')
+
+            return True
+        except ticket.TicketError:
+            pass
 
         return False
 
+    def verify_crowd_token(self):
+        log = self.makelogger('PREAUTH')
+
+        # Is Crowd authentication still valid?
+        crowd_token = cherrypy.request.ctx['pubtkt']['udata']
+        res, data = cherrypy.request.api.verify_session(crowd_token)
+
+        if res != '200':
+            log('Crowd token is not valid.')
+            return False
+
+        log('Crowd token is valid.')
+        cherrypy.request.ctx['crowd_token'] = crowd_token
+        return True
+
     def set_cookie_and_redirect (self):
-        user = cherrypy.request.crowd_user
+
+        self.set_pubtkt_cookie()
+        self.set_crowd_cookie()
+
+        back = cherrypy.request.params.get('back')
+        if back:
+            raise cherrypy.HTTPRedirect(back)
+        else:
+            return self.render('loginok',
+                    user=cherrypy.request.crowd_user,
+                    params=cherrypy.request.params,
+                    request=cherrypy.request)
+
+    def set_pubtkt_cookie(self):
+        user = cherrypy.request.ctx['crowd_user']
 
         # Get groups from Crowd.
-        res,groups = cherrypy.request.crowdapi.request(
+        res,groups = cherrypy.request.api.request(
                 'user/group/nested', username=user)
         groups = [x['name'] for x in groups.get('groups', [])]
 
@@ -144,121 +210,99 @@ class App (object):
                 graceperiod = self.graceperiod)
 
         tkt.sign(self.privkey)
-        print tkt.to_string(sig=True)
 
         cherrypy.response.cookie[self.cookiename] = urllib.quote(
                 tkt.to_string(sig=True))
-        
-        back = cherrypy.request.params.get('back')
-        if back:
-            print 'REDIRECT', back
-            raise cherrypy.HTTPRedirect(back)
-        else:
-            print 'CONFIRM'
-            return self.pages.render('loginok',
-                    macros=['common'],
-                    user=user,
-                    params=cherrypy.request.params,
-                    request=cherrypy.request)
+        cherrypy.response.cookie[self.cookiename]['path'] = '/'
 
-    def logout(self, app=None, back=None):
+    def delete_pubtkt_cookie(self):
         cherrypy.response.cookie[self.cookiename] = ''
+        cherrypy.response.cookie[self.cookiename]['path'] = '/'
         cherrypy.response.cookie[self.cookiename]['expires'] = 0
-        return self.pages.render('logout', macros=['common'], back=back)
 
-    def unauth(self, app=None, back=None):
-        return self.pages.render('unauth', macros=['common'], back=back)
+    def set_crowd_cookie(self):
+        cookie = cherrypy.request.api.request('config/cookie')
+        cherrypy.response.cookie[cookie[1]['name']] = cherrypy.request.crowd_token
+        cherrypy.response.cookie[cookie[1]['name']]['path'] = '/'
+#        cherrypy.response.cookie[cookie[1]['name']]['domain'] = \
+#                cookie[1]['domain']
+
+    def delete_crowd_cookie(self):
+        cookie = cherrypy.request.api.request('config/cookie')
+        cherrypy.response.cookie[cookie[1]['name']] = ''
+        cherrypy.response.cookie[cookie[1]['name']]['path'] = '/'
+        cherrypy.response.cookie[cookie[1]['name']]['expires'] = 0
+#        cherrypy.response.cookie[cookie[1]['name']]['domain'] = \
+#                cookie[1]['domain']
+
+    def logout(self, appname, back=None):
+        self.delete_crowd_cookie()
+        self.delete_pubtkt_cookie()
+        return self.render('logout', back=back)
+
+    def unauth(self, appname, back=None):
+        return self.render('unauth', back=back)
 
     @cherrypy.tools.response_headers(headers = [('Content-Type', 'text/plain')])
     def showconfig(self):
         return pprint.pformat(cherrypy.request.config)
 
     @cherrypy.tools.response_headers(headers = [('Content-Type', 'text/plain')])
-    def checkpw(self, app, user, password):
-        crowdapp = cherrypy.request.config['crowd:%s' % app]
-        api = self.get_api_object(crowdapp)
+    def checkpw(self, appname, user, password):
+        crowdapp = cherrypy.request.config['crowd:%s' % appname]
 
         return pprint.pformat(api.authenticate(user, password))
 
-    @cherrypy.tools.response_headers(headers = [('Content-Type', 'text/plain')])
-    def session(self, app, user, password):
-        crowdapp = cherrypy.request.config['crowd:%s' % app]
-        api = self.get_api_object(crowdapp)
-
-        tok = api.request('session',
-            postdata={
-                'username': user,
-                'password': password,
-                'validation-factors': {
-                    'validationFactors': [ {
-                    'name': 'remote_address',
-                    'value': '10.243.18.22',
-                    } ]
-                    }
-                },
-            **{'validate-password': 'false'}
-            )
-
-        cookie = api.request('config/cookie')
-
-        cherrypy.response.cookie[cookie[1]['name']] = tok[1]['token']
-        cherrypy.response.cookie[cookie[1]['name']]['path'] = '/'
-        cherrypy.response.cookie[cookie[1]['name']]['domain'] = \
-                cookie[1]['domain']
-
-        return '\n'.join([
-                pprint.pformat(tok),
-                pprint.pformat(cookie)
-                ])
-
     def render (self, page, **params):
-        return self.pages.render(page, macros=['common'], **params)
+        return self.pages.render(page,
+                macros=['common'],
+                **params)
 
     def setup_routes(self):
         d = cherrypy.dispatch.RoutesDispatcher()
 
         d.connect('config', '/dump',        self.showconfig)
-        d.connect('checkpw', '/:app/checkpw/:user/:password',
-                                            self.checkpw)
-        d.connect('session', '/:app/session/:user/:password',
-                                            self.session)
-        d.connect('render', '/render/:page', self.render)
 
-        d.connect('logout', '/logout',      self.logout)
-        d.connect('unauth', '/unauth',      self.unauth)
-
-        d.connect('login',  '/:app/login',  self.login)
+        d.connect('unauth', '/:appname/unauth', self.unauth)
+        d.connect('login',  '/:appname/login',  self.login)
+        d.connect('logout', '/:appname/logout', self.logout)
 
         return d
 
     def run(self):
         cherrypy.config.update(self.config)
+        cherrypy.tools.setup_request = cherrypy.Tool('on_start_resource',
+                self.setup_request)
 
         global_conf = {
             '/': {
                 'request.dispatch': self.setup_routes(),
                 'error_page.default': self.error,
                 'tools.staticdir.root': os.getcwd(),
+                'tools.staticfile.root': os.getcwd(),
+                'tools.setup_request.on': True,
                 },
             '/static': {
                 'tools.staticdir.on': True,
                 'tools.staticdir.dir': 'static'
-                }
+                },
+            '/favicon.ico': {
+                'tools.staticfile.on': True,
+                'tools.staticfile.filename': 'static/images/favicon.ico'
+                },
             }
 
-        app = cherrypy.tree.mount(None, config=global_conf)
+        self.app = cherrypy.tree.mount(None, config=global_conf)
 
         self.pages = pages.Pages(
                 cherrypy.config['pubtkt']['templatedir'])
-        self.pubkey = RSA.load_pub_key(
-                cherrypy.config['pubtkt']['pubkey'])
-        self.privkey = RSA.load_key(
-                cherrypy.config['pubtkt']['privkey'])
+        self.pubkey = cherrypy.config['pubtkt']['pubkey']
+        self.privkey = cherrypy.config['pubtkt']['privkey']
         self.validuntil = datetime.timedelta(
                 minutes=int(cherrypy.config['pubtkt']['validuntil']))
         self.graceperiod = datetime.timedelta(
                 minutes=int(cherrypy.config['pubtkt']['graceperiod']))
- 
+
         cherrypy.engine.start()
         cherrypy.engine.block()
 

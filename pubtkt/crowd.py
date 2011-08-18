@@ -37,7 +37,9 @@ class Crowd (object):
         self.client.add_credentials(self.crowd_name, self.crowd_pass)
 
     def __str__ (self):
-        return '<Crowd %s>' % self.crowd_name
+        return '<Crowd %s @ %s>' % (
+                self.crowd_name,
+                self.baseurl)
 
     def request(self, uri, method='GET', postdata=None, debug=False, **params):
         # Turn the params dictionary into a query string,
@@ -79,9 +81,9 @@ class Crowd (object):
                 postdata={ 'value': password },
                 username=user)
 
-    def create_session(self, user, password='', factors=None):
-        if not password:
-            uri = 'session/validate-password=false'
+    def create_session(self, user, password=None, factors=None):
+        if password is None:
+            uri = 'session?validate-password=false'
         else:
             uri = 'session'
 
