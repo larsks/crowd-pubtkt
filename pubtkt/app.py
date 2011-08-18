@@ -78,13 +78,14 @@ class App (object):
             submit=None, alert=None):
 
         log = self.makelogger('LOGIN')
-        log('Login request to %s by %s.' % (appname, user))
+        log('Login request to %s by %s.' % (appname, user or 'unknown'))
 
         try:
             self.preauth()
             self.authenticate(user, password)
         except LoginOK, detail:
-            log('Login okay: %s' % detail)
+            log('Login okay: %s via %s' %
+                    (cherrypy.request.ctx['auth_user'], detail))
             return self.set_cookie_and_redirect()
         except LoginFAIL, detail:
             log('Login failed: %s' % detail)
@@ -151,9 +152,8 @@ class App (object):
         log = self.makelogger('PREAUTH')
         log('Starting preauth.')
 
-        if self.verify_pubtkt_cookie():
-            if self.verify_crowd_token():
-                raise LoginOK('PREAUTH')
+        if self.verify_crowd_token():
+            raise LoginOK('PREAUTH (crowd)')
 
         log('Could not preauthenticate request.')
 
@@ -162,8 +162,8 @@ class App (object):
         if not 'pubtkt' in cherrypy.request.ctx:
             return False
 
-        log('Found pubtkt cookie.')
         pubtkt = cherrypy.request.ctx['pubtkt']
+        log('Found pubtkt cookie for user %(uid)s.' % pubtkt)
 
         # Has ticket expired?
         if pubtkt['validuntil'] < time.time():
@@ -175,6 +175,8 @@ class App (object):
 
     def verify_crowd_token(self):
         log = self.makelogger('PREAUTH')
+        if not 'crowd_token' in cherrypy.request.ctx:
+            return False
 
         # Is Crowd authentication still valid?
         res, data = cherrypy.request.api.verify_session(
