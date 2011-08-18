@@ -60,6 +60,8 @@ class App (object):
         if 'appname' in cherrypy.request.params:
             self.get_api_object(cherrypy.request.params['appname'])
 
+            # Read pubtkt cookie (and extract crowd token).
+            # TODO: Do we care?  Not sure.
             if self.cookiename in cherrypy.request.cookie:
                 cookie = cherrypy.request.cookie[self.cookiename]
 
@@ -69,10 +71,19 @@ class App (object):
                             urllib.unquote(cookie.value))
                     pubtkt.verify(self.pubkey)
                     log('Verified signature on pubtkt cookie.')
+                    log('Getting crowd token from pubtkt cookie.')
                     cherrypy.request.ctx['pubtkt'] = pubtkt
                     cherrypy.request.ctx['crowd_token'] = pubtkt['udata']
+                    return
                 except ticket.TicketError:
                     pass
+
+            # Read Crowd cookie.
+            res, cookie = cherrypy.request.api.request('config/cookie')
+            if res == '200' and cookie['name'] in cherrypy.request.cookie:
+                log('Getting crowd token from Crowd SSO cookie.')
+                cherrypy.request.ctx['crowd_token'] = \
+                        cherrypy.request.cookie[cookie['name']].value
 
     def login(self, appname, back=None, user=None, password=None,
             submit=None, alert=None):
