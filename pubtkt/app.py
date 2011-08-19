@@ -13,23 +13,29 @@ import crowd
 import pages
 
 class LoginOK (Exception):
+    '''Raised to indicate successful authentication.'''
     pass
 
 class LoginFAIL (Exception):
-    pass
-
-class LoginPASS (Exception):
+    '''Raised to indicate failed authentication.'''
     pass
 
 class App (object):
     cookiename = 'seas_ac_auth'
 
     def __init__ (self, config):
+        '''``config`` is a path to a cherrypy-style configuration
+        file (which means INI style, but the values have to be valid
+        Python.'''
+
         self.config = config
 
     def error(self, status, message, traceback, version):
+        '''Called on unexpected errors via error_page.default'''
+
         return self.render('error', 
-                status=status, message=message)
+                status=status,
+                message=message)
 
     def get_api_object(self, appname):
         '''Creates a new crowd.Crowd object using the
@@ -51,7 +57,8 @@ class App (object):
     def setup_request(self):
         '''This is called at the start of every request.  It initializes
         cherrypy.request.ctx and, if possible, initializes
-        the Crowd API objects.'''
+        the Crowd API objects and processes authentication 
+        cookies.'''
 
         log = self.makelogger('SETUP')
 
@@ -75,8 +82,8 @@ class App (object):
                     cherrypy.request.ctx['pubtkt'] = pubtkt
                     cherrypy.request.ctx['crowd_token'] = pubtkt['udata']
                     return
-                except ticket.TicketError:
-                    pass
+                except ticket.TicketError, detail:
+                    log('Error processing pubtkt: %s' % detail)
 
             # Read Crowd cookie.
             res, cookie = cherrypy.request.api.request('config/cookie')
@@ -87,6 +94,10 @@ class App (object):
 
     def login(self, appname, back=None, user=None, password=None,
             submit=None, alert=None):
+
+        '''Attempt to authenticate a user.  This will attempt to 
+        preauthenticate a user via an existing SSO token, and if
+        that fails will then handle password authentication.'''
 
         log = self.makelogger('LOGIN')
         log('Login request to %s by %s.' % (appname, user or 'unknown'))
@@ -101,12 +112,12 @@ class App (object):
         except LoginFAIL, detail:
             log('Login failed: %s' % detail)
             return self.loginform('Bad username or password.')
-        except LoginPASS:
-            pass
 
         return self.loginform()
 
     def loginform(self, alert=None):
+        '''Render the login form.'''
+
         if not cherrypy.request.params.get('user'):
             if 'pubtkt' in cherrypy.request.ctx:
                 user = cherrypy.request.ctx['pubtkt']['uid']
@@ -119,12 +130,30 @@ class App (object):
                 request=cherrypy.request)
 
     def makelogger(self, context):
+        '''This is a convenience wrapper for cherrypy.request.app.log
+        that returns a callable for logging a message with the given
+        context.  That is::
+
+            log = self.makelogger('PREAUTH')
+            log('Hello world!')
+
+        Is the same as::
+
+            cherrypy.request.app.log('Hello world!',
+                context='PREAUTH')
+
+        But it will save you typing if you need to send more than
+        one log message.'''
+            
         def _ (*args, **kwargs):
             kwargs['context'] = context
             return cherrypy.request.app.log(*args, **kwargs)
         return _
 
     def authenticate(self, user, password):
+        '''Authenticate a username and password against
+        Crowd.'''
+
         if not (user or password):
             return
 
@@ -160,6 +189,9 @@ class App (object):
         raise LoginOK('AUTHENTICATE')
 
     def preauth (self):
+        '''Attempt to authenticate a user using an existing SSO
+        token.'''
+
         log = self.makelogger('PREAUTH')
         log('Starting preauth.')
 
@@ -185,6 +217,8 @@ class App (object):
         return True
 
     def verify_crowd_token(self):
+        '''Ensure that a Crowd SSO token is still valid.'''
+
         log = self.makelogger('PREAUTH')
         if not 'crowd_token' in cherrypy.request.ctx:
             return False
@@ -202,6 +236,7 @@ class App (object):
         return True
 
     def set_cookie_and_redirect (self):
+        '''Set the Pubtkt and Crowd SSO cookies.'''
 
         self.set_pubtkt_cookie()
         self.set_crowd_cookie()
@@ -267,6 +302,9 @@ class App (object):
             log('Invalidated Crowd session (%s)' % res)
 
     def logout(self, appname, back=None):
+        '''Delete all SSO cookies and invalidate the Crowd
+        session.'''
+
         self.invalidate_crowd_session()
         self.delete_crowd_cookie()
         self.delete_pubtkt_cookie()
@@ -279,24 +317,22 @@ class App (object):
     def showconfig(self):
         return pprint.pformat(cherrypy.request.config)
 
-    @cherrypy.tools.response_headers(headers = [('Content-Type', 'text/plain')])
-    def checkpw(self, appname, user, password):
-        crowdapp = cherrypy.request.config['crowd:%s' % appname]
-
-        return pprint.pformat(api.authenticate(user, password))
-
     def render (self, page, **params):
+        '''Render a page, making sure that any macro collections
+        are available.'''
+
         return self.pages.render(page,
                 macros=['common'],
                 **params)
 
     def default(self):
-        return self.render('notimplemented')
+        '''Handler for "/".'''
+        return self.render('default')
 
     def setup_routes(self):
         d = cherrypy.dispatch.RoutesDispatcher()
 
-        d.connect('config', '/dump',        self.showconfig)
+#        d.connect('config', '/dump',        self.showconfig)
 
         d.connect('unauth', '/:appname/unauth', self.unauth)
         d.connect('login',  '/:appname/login',  self.login)
@@ -342,4 +378,7 @@ class App (object):
 
         cherrypy.engine.start()
         cherrypy.engine.block()
+
+if __name__ == '__main__':
+    pass
 
