@@ -1,12 +1,24 @@
+# We need this to catch socket.timeout
+import socket
+
 import simplejson as json
 import httplib2 as httplib
 import urllib
 
 class CrowdError (Exception):
+    pass
+
+class APIError (CrowdError):
     def __init__ (self, msg, resp=None, content=None):
         self.resp = resp
         self.content = content
         super(CrowdError, self).__init__(msg)
+
+class Timeout (CrowdError):
+    pass
+
+class Disabled (CrowdError):
+    pass
 
 class Crowd (object):
 
@@ -15,7 +27,7 @@ class Crowd (object):
 
     def __init__ (self, baseurl, crowd_name, crowd_pass, 
             apiname='usermanagement', apiversion='latest',
-            novalidate=True):
+            novalidate=True, timeout=None):
 
         '''baseurl -- base URL of the Crowd instance
         crowd_name -- crowd application name
@@ -24,6 +36,7 @@ class Crowd (object):
         apiversion -- api version ("latest")
         novalidate -- True to disable certificate validation
                       for SSL connections (True).
+        timeout    -- timeout value passed to httplib2.
         '''
 
         self.baseurl = baseurl
@@ -31,9 +44,11 @@ class Crowd (object):
         self.apiversion = apiversion
         self.crowd_name = crowd_name
         self.crowd_pass = crowd_pass
+        self.enabled = True
 
         self.client = httplib.Http(
-                disable_ssl_certificate_validation=novalidate)
+                disable_ssl_certificate_validation=novalidate,
+                timeout=timeout)
         self.client.add_credentials(self.crowd_name, self.crowd_pass)
 
     def __str__ (self):
@@ -41,8 +56,15 @@ class Crowd (object):
                 self.crowd_name,
                 self.baseurl)
 
+    def disable(self):
+        self.enabled = False
+
     def request(self, uri, path_info='', add_json=True, 
             method='GET', postdata=None, debug=False, **params):
+
+        if not self.enabled:
+            raise Disabled()
+
         # Turn the params dictionary into a query string,
         qs = '&'.join(['%s=%s' % (urllib.quote(k), urllib.quote(v)) for
             (k,v) in params.items()])
@@ -72,8 +94,11 @@ class Crowd (object):
             print 'BODY:', body
             print '=== DEBUG ==='
 
-        resp,content = self.client.request(url, method,
-                headers=headers, body=body)
+        try:
+            resp,content = self.client.request(url, method,
+                    headers=headers, body=body)
+        except socket.timeout:
+            raise Timeout()
 
         if add_json and resp['content-type'] != 'application/json':
             raise CrowdError('Did not receive JSON response.',
