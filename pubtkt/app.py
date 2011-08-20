@@ -96,11 +96,10 @@ class App (object):
             # Initialize cache value
             crowd_token = cherrypy.request.ctx['crowd_token']
 
-            ck = ('%s/%s' % (appname, crowd_token)).encode('UTF-8')
-            log('Looking for cache key %s' % ck)
+            ck = self.cache_key()
             cv = cherrypy.request.mc.get(ck)
 
-            if cv is not None and self.is_trusted(cv):
+            if cv is not None:
                 cherrypy.request.cv.update(cv)
                 log('Found trusted credentials in cache.')
 
@@ -147,14 +146,11 @@ class App (object):
             crowd_token = cherrypy.request.ctx['crowd_token']
             appname = cherrypy.request.params['appname']
 
-            ck = ('%s/%s' % (appname, crowd_token)).encode('UTF-8')
+            ck = self.cache_key()
+            timeout = int(cherrypy.request.config['pubtkt']['trust_timeout'])
             log('Storing cached credentials in cache key %s.' % ck)
-            cherrypy.request.mc.set( ck, cherrypy.request.cv)
-
-    def is_trusted (self, cv):
-        return cv.get('auth_time', 0) > (
-                time.time() -
-                int(cherrypy.request.config['pubtkt']['trust_timeout']))
+            cherrypy.request.mc.set(ck, cherrypy.request.cv,
+                    time=timeout)
 
     def login(self, appname, back=None, user=None, password=None,
             submit=None, alert=None):
@@ -378,22 +374,22 @@ class App (object):
 
     def set_crowd_cookie(self):
         try:
-            cookie = cherrypy.request.api.request('config/cookie')
-            cherrypy.response.cookie[cookie[1]['name']] = \
+            res, cookie = cherrypy.request.api.request('config/cookie')
+            cherrypy.response.cookie[cookie['name']] = \
                     cherrypy.request.ctx['crowd_token']
-            cherrypy.response.cookie[cookie[1]['name']]['path'] = '/'
-#        cherrypy.response.cookie[cookie[1]['name']]['domain'] = \
-#                cookie[1]['domain']
+            cherrypy.response.cookie[cookie['name']]['path'] = '/'
+#        cherrypy.response.cookie[cookie['name']]['domain'] = \
+#                cookie['domain']
         except (crowd.Disabled,crowd.Timeout):
             pass
 
     def delete_crowd_cookie(self):
-        cookie = cherrypy.request.api.request('config/cookie')
-        cherrypy.response.cookie[cookie[1]['name']] = ''
-        cherrypy.response.cookie[cookie[1]['name']]['path'] = '/'
-        cherrypy.response.cookie[cookie[1]['name']]['expires'] = 0
-#        cherrypy.response.cookie[cookie[1]['name']]['domain'] = \
-#                cookie[1]['domain']
+        res, cookie = cherrypy.request.api.request('config/cookie')
+        cherrypy.response.cookie[cookie['name']] = ''
+        cherrypy.response.cookie[cookie['name']]['path'] = '/'
+        cherrypy.response.cookie[cookie['name']]['expires'] = 0
+#        cherrypy.response.cookie[cookie['name']]['domain'] = \
+#                cookie['domain']
 
     def invalidate_crowd_session(self):
         log = self.makelogger('LOGOUT')
@@ -411,14 +407,26 @@ class App (object):
         session.'''
 
         self.invalidate_crowd_session()
+        self.delete_cached_credentials()
         self.delete_crowd_cookie()
         self.delete_pubtkt_cookie()
         return self.render('logout', back=back)
 
+    def cache_key(self):
+        crowd_token = cherrypy.request.ctx['crowd_token']
+        appname = cherrypy.request.params['appname']
+        return ('%s:%s' % (appname, crowd_token)).encode('UTF-8')
+
+    def delete_cached_credentials(self):
+        ck = self.cache_key()
+        cherrypy.request.mc.delete(ck)
+        cherrypy.request.cv = None
+
     def unauth(self, appname, back=None):
         return self.render('unauth', back=back)
 
-    @cherrypy.tools.response_headers(headers = [('Content-Type', 'text/plain')])
+    @cherrypy.tools.response_headers(headers = [
+        ('Content-Type', 'text/plain')])
     def showconfig(self):
         return pprint.pformat(cherrypy.request.config)
 
