@@ -66,8 +66,7 @@ class Crowd (object):
             raise Disabled()
 
         # Turn the params dictionary into a query string,
-        qs = '&'.join(['%s=%s' % (urllib.quote(k), urllib.quote(v)) for
-            (k,v) in params.items()])
+        qs = urllib.urlencode(params)
 
         if add_json:
             ext='.json'
@@ -82,7 +81,9 @@ class Crowd (object):
                 uri, ext, path_info, qs)
 
         body = None
-        headers = {'Content-type': 'application/json'}
+        headers = {
+                'Content-type'  : 'application/json',
+                }
 
         if postdata is not None:
             method = 'POST'
