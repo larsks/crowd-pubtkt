@@ -14,6 +14,8 @@ import ticket
 import crowd
 import pages
 
+CACHEVERSION=2
+
 class LoginOK (Exception):
     '''Raised to indicate successful authentication.'''
     pass
@@ -48,29 +50,30 @@ class App (object):
         '''Creates a new crowd.Crowd object using the
         configuration appropriate to the current request.'''
 
+        conf = cherrypy.request.config['pubtkt']
+
         try:
-            appconfig = cherrypy.request.config['crowd:%s' % appname]
+            appconf = cherrypy.request.config['crowd:%s' % appname]
         except KeyError:
             raise cherrypy.HTTPError('404')
 
-        crowd_server = cherrypy.request.config['pubtkt']['crowd_server']
+        crowd_server = conf['crowd_server']
         if crowd_server.endswith('/'):
             crowd_server = crowd_server[:-1]
 
-        api = crowd.Crowd(crowd_server,
-                appconfig['crowd_name'],
-                appconfig['crowd_pass'],
-                timeout=int(cherrypy.request.config['pubtkt']['api_timeout']),
+        apitimeout = int(conf['api_timeout'])
+        api = crowd.RESTClient(
+                crowd_server,
+                (appconf['crowd_name'], appconf['crowd_pass']),
+                apitimeout=int(conf['api_timeout']),
+                cacheclients=conf['memcache_clients'],
                 )
 
-        cherrypy.request.appconfig = appconfig
+        cherrypy.request.appconf = appconf
         cherrypy.request.api = api
 
     def setup_request(self):
-        '''This is called at the start of every request.  It initializes
-        cherrypy.request.ctx and, if possible, initializes
-        the Crowd API objects and processes authentication 
-        cookies.'''
+        '''This is called at the start of every request.'''
 
         if self.debug:
             cherrypy.request.app.log.error_log.setLevel(logging.DEBUG)
@@ -78,35 +81,35 @@ class App (object):
         log = self.makelogger('SETUP')
         log('Starting setup_request.')
 
-        # random data used througout the request
-        cherrypy.request.ctx = {}
+        if not 'appname' in cherrypy.request.params:
+            log('No appname in request.')
+            return
 
-        # stored in cache keyed by crowd token
+        conf = cherrypy.request.config['pubtkt']
+        ctx = cherrypy.request.ctx = {}
         cherrypy.request.cv = {}
+        cherrypy.request.mc = memcache.Client(conf['memcache_clients'])
 
-        cherrypy.request.mc = memcache.Client(
-                cherrypy.config['pubtkt']['memcache_clients'])
+        self.get_api_object(
+                cherrypy.request.params['appname'])
 
-        if 'appname' in cherrypy.request.params:
-            appname = cherrypy.request.params['appname']
-            self.get_api_object(appname)
+        # Read Crowd cookie configuration.
+        cookie = cherrypy.request.api.config.cookie()
+        ctx['crowd_cookie_name'] = cookie['name']
 
-            try:
-                self.get_token_from_pubtkt()
-                self.get_token_from_crowd()
-                return
-            except FoundSSOToken:
-                pass
+        try:
+            self.get_token_from_pubtkt()
+            self.get_token_from_crowd()
+            return
+        except FoundSSOToken:
+            pass
 
-            # Initialize cache value
-            crowd_token = cherrypy.request.ctx['crowd_token']
+        ck = self.cachekey()
+        cv = cherrypy.request.mc.get(ck)
 
-            ck = self.cache_key()
-            cv = cherrypy.request.mc.get(ck)
-
-            if cv is not None:
-                cherrypy.request.cv.update(cv)
-                log('Found trusted credentials in cache.')
+        if cv is not None:
+            cherrypy.request.cv.update(cv)
+            log('Found trusted credentials in cache.')
 
     def get_token_from_pubtkt(self):
         log = self.makelogger('SETUP')
@@ -131,13 +134,12 @@ class App (object):
 
     def get_token_from_crowd(self):
         log = self.makelogger('SETUP')
+        ctx = cherrypy.request.ctx
 
-        # Read Crowd cookie.
-        res, cookie = cherrypy.request.api.request('config/cookie')
-        if res == '200' and cookie['name'] in cherrypy.request.cookie:
+        if ctx['crowd_cookie_name'] in cherrypy.request.cookie:
             log('Getting crowd token from Crowd SSO cookie.')
             cherrypy.request.ctx['crowd_token'] = \
-                    cherrypy.request.cookie[cookie['name']].value
+                    cherrypy.request.cookie[ctx['crowd_cookie_name']].value
             raise FoundSSOToken()
 
     def finish_request(self):
@@ -147,14 +149,20 @@ class App (object):
         log = self.makelogger('FINISH')
         log('Starting finish_request.')
 
-        if 'crowd_token' in cherrypy.request.ctx and cherrypy.request.cv:
-            crowd_token = cherrypy.request.ctx['crowd_token']
-            appname = cherrypy.request.params['appname']
+        if not 'appname' in cherrypy.request.params:
+            log('No appname in request.')
+            return
 
-            ck = self.cache_key()
-            timeout = int(cherrypy.request.config['pubtkt']['trust_timeout'])
+        ctx = cherrypy.request.ctx
+        conf = cherrypy.request.config['pubtkt']
+
+        if cherrypy.request.cv:
+            ck = self.cachekey()
+            timeout = int(conf['trust_timeout'])
             log('Storing cached credentials in cache key %s.' % ck)
-            cherrypy.request.mc.set(ck, cherrypy.request.cv,
+            cherrypy.request.mc.set(
+                    ck, 
+                    cherrypy.request.cv,
                     time=timeout)
 
     def login(self, appname, back=None, user=None, password=None,
@@ -193,7 +201,7 @@ class App (object):
 
         return self.render('login',
                 alert=alert,
-                appname=cherrypy.request.appconfig.get('name'),
+                appname=cherrypy.request.appconf.get('name'),
                 params=cherrypy.request.params,
                 request=cherrypy.request)
 
@@ -229,17 +237,16 @@ class App (object):
             return
 
         log = self.makelogger('AUTHENTICATE')
+        ctx = cherrypy.request.ctx
+        cv = cherrypy.request.cv
+        conf = cherrypy.request.config['pubtkt']
         log('Trying to authenticate user %s.' % user)
 
         if (user and not password) or (password and not user):
             raise LoginFAIL('Missing username or password.')
 
         try:
-            res, userinfo = cherrypy.request.api.authenticate(user, password)
-
-            if res != '200':
-                raise LoginFAIL('Crowd authentication failed.')
-
+            userinfo = cherrypy.request.api.authenticate(user, password)
             log('Good password for user %s.' % user)
 
             if not userinfo['active']:
@@ -248,19 +255,18 @@ class App (object):
             log('User %s is active.' % user)
 
             # Get session token from Crowd.
-            res, session = cherrypy.request.api.create_session(
-                    user, password)
+            session = cherrypy.request.api.session.post(
+                    body={'username': user, 'password': password})
 
-            if res != '201':
-                raise LoginFAIL('Failed to create new session for %s.' % user)
-
-            cherrypy.request.cv['auth_time'] = time.time()
-            cherrypy.request.ctx['crowd_token'] = session['token']
-            cherrypy.request.ctx['auth_user'] = user
+            cv['userinfo'] = userinfo
+            cv['session'] = session
+            cv['auth_time'] = time.time()
+            ctx['crowd_token'] = session['token']
+            ctx['auth_user'] = user
 
             log('Successful authentication for user %s.' % user)
             raise LoginOK('AUTHENTICATE')
-        except crowd.CrowdError, detail:
+        except crowd.RESTError, detail:
             raise LoginFAIL('Crowd API failed: %s' % detail)
 
     def preauth (self):
@@ -295,25 +301,25 @@ class App (object):
         '''Ensure that a Crowd SSO token is still valid.'''
 
         log = self.makelogger('PREAUTH')
-        if not 'crowd_token' in cherrypy.request.ctx:
+        ctx = cherrypy.request.ctx
+        conf = cherrypy.request.config['pubtkt']
+
+        if not 'crowd_token' in ctx:
             return False
 
-        crowd_token = cherrypy.request.ctx['crowd_token']
-        trust_timeout = float(
-                cherrypy.request.config['pubtkt']['trust_timeout'])
+        crowd_token = ctx['crowd_token']
+        log('Crowd token: %s' % crowd_token)
 
         # Is Crowd authentication still valid?
         try:
-            res, session = cherrypy.request.api.verify_session(crowd_token)
-
-            if res != '200':
-                log('Crowd token is not valid.')
-                cherrypy.request.mc.delete(crowd_token)
-                return False
+            session = cherrypy.request.api.session.post('/%s' % crowd_token)
 
             log('Crowd token is valid.')
             cherrypy.request.cv['auth_time'] = time.time()
             cherrypy.request.cv['session'] = session
+        except crowd.HTTPError, detail:
+            log('Crowd token is not valid (%s)' % detail)
+            return False
         except (crowd.Disabled,crowd.Timeout):
             log('Crowd timed out', severity=logging.ERROR)
             cherrypy.request.api.disable()
@@ -325,7 +331,7 @@ class App (object):
             log('Found credentials in cache.')
             session = cherrypy.request.cv['session']
 
-        cherrypy.request.ctx['auth_user'] = session['user']['name']
+        ctx['auth_user'] = session['user']['name']
         return True
 
     def set_cookie_and_redirect (self):
@@ -351,14 +357,13 @@ class App (object):
         groups = []
 
         try:
-            res,groups = cherrypy.request.api.request(
-                    'user/group/nested', username=user)
+            groups = cherrypy.request.api.user.group.nested(
+                    username=user)
 
-            if res == '200':
-                groups = [x['name'] for x in groups.get('groups', [])]
-                cherrypy.request.cv['groups'] = groups
-            else:
-                log('Failed to get groups from Crowd (%s).' % res)
+            groups = [x['name'] for x in groups.get('groups', [])]
+            cherrypy.request.cv['groups'] = groups
+        except crowd.HTTPError, detail:
+            log('Failed to get groups from Crowd (%s).' % detail)
         except (crowd.Disabled,crowd.Timeout):
             log('Crowd timed out', severity=logging.ERROR)
             cherrypy.request.api.disable()
@@ -384,34 +389,40 @@ class App (object):
         cherrypy.response.cookie[self.cookiename]['expires'] = 0
 
     def set_crowd_cookie(self):
+        ctx = cherrypy.request.ctx
+
         try:
-            res, cookie = cherrypy.request.api.request('config/cookie')
-            cherrypy.response.cookie[cookie['name']] = \
-                    cherrypy.request.ctx['crowd_token']
-            cherrypy.response.cookie[cookie['name']]['path'] = '/'
-#        cherrypy.response.cookie[cookie['name']]['domain'] = \
+            cherrypy.response.cookie[ctx['crowd_cookie_name']] = \
+                    ctx['crowd_token']
+            cherrypy.response.cookie[ctx['crowd_cookie_name']]['path'] = '/'
+#        cherrypy.response.cookie[ctx['crowd_cookie_name']]['domain'] = \
 #                cookie['domain']
         except (crowd.Disabled,crowd.Timeout):
             pass
 
     def delete_crowd_cookie(self):
-        res, cookie = cherrypy.request.api.request('config/cookie')
-        cherrypy.response.cookie[cookie['name']] = ''
-        cherrypy.response.cookie[cookie['name']]['path'] = '/'
-        cherrypy.response.cookie[cookie['name']]['expires'] = 0
+        ctx = cherrypy.request.ctx
+
+        cherrypy.response.cookie[ctx['crowd_cookie_name']] = ''
+        cherrypy.response.cookie[ctx['crowd_cookie_name']]['path'] = '/'
+        cherrypy.response.cookie[ctx['crowd_cookie_name']]['expires'] = 0
 #        cherrypy.response.cookie[cookie['name']]['domain'] = \
 #                cookie['domain']
 
     def invalidate_crowd_session(self):
         log = self.makelogger('LOGOUT')
+        ctx = cherrypy.request.ctx
 
-        if 'crowd_token' in cherrypy.request.ctx:
-            token = cherrypy.request.ctx['crowd_token']
-            cherrypy.request.mc.delete(token)
-            res, data = cherrypy.request.api.request(
-                    'session', path_info='/%s' % token, 
-                    add_json=False, method='DELETE')
-            log('Invalidated Crowd session (%s)' % res)
+        if 'crowd_token' in ctx:
+            ck = self.cachekey()
+            cherrypy.request.mc.delete(ck)
+            try:
+                session = cherrypy.request.api.session.delete(
+                        '/%s' % ctx['crowd_token'])
+            except crowd.RESTError, detail:
+                log('Error expiring session: %s' % detail)
+
+            log('Invalidated Crowd session.')
 
     def logout(self, appname, back=None):
         '''Delete all SSO cookies and invalidate the Crowd
@@ -423,24 +434,22 @@ class App (object):
         self.delete_pubtkt_cookie()
         return self.render('logout', back=back)
 
-    def cache_key(self):
+    def cachekey(self):
+        if not 'crowd_token' in cherrypy.request.ctx:
+            return
+
         crowd_token = cherrypy.request.ctx['crowd_token']
         appname = cherrypy.request.params['appname']
-        return ('%s:%s' % (appname, crowd_token)).encode('UTF-8')
+        return ('%s:%s:%s' % (CACHEVERSION, appname, crowd_token)).encode('UTF-8')
 
     def delete_cached_credentials(self):
-        if 'crowd_token' in cherrypy.request.ctx:
-            ck = self.cache_key()
+        ck = self.cachekey()
+        if ck:
             cherrypy.request.mc.delete(ck)
             cherrypy.request.cv = None
 
     def unauth(self, appname, back=None):
         return self.render('unauth', back=back)
-
-    @cherrypy.tools.response_headers(headers = [
-        ('Content-Type', 'text/plain')])
-    def showconfig(self):
-        return pprint.pformat(cherrypy.request.config)
 
     def render (self, page, **params):
         '''Render a page, making sure that any macro collections

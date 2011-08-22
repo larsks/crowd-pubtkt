@@ -4,16 +4,24 @@ import simplejson as json
 import hashlib
 import memcache
 import fnmatch
+import socket
 
 METHODS = [ 'get', 'post', 'put', 'delete' ]
+
 CACHEVERSION=12
 CACHETIMEOUT=30
+
+# This associates REST resources with
+# cache timeouts.  Note that currently
+# this only affects GET requests.
 CACHEMAP = {
     'config/cookie' : 3600,
     'group*'        : 1800,
     'user*'         : 1800,
-    'session*'      : 30,
+    'session*'      : 600,
         }
+
+APITIMEOUT = None
 
 class RESTError(Exception):
     def __init__ (self, method, uri, resp, content):
@@ -22,16 +30,47 @@ class RESTError(Exception):
         self.resp = resp
         self.content = content
 
-        super(APIError, self).__init__('Error %s from %s' %
-                (resp['status'], uri))
+        if resp is not None:
+            status = resp['status']
+        else:
+            status = 'UNKNOWN'
+
+        super(RESTError, self).__init__('Error %s from %s' %
+                (status, uri))
 
 class APIError (RESTError):
+    pass
+
+class HTTPError (RESTError):
+    pass
+
+class HTTPBadRequest (HTTPError):
+    status = 400
+    pass
+
+class HTTPUnauthorized (HTTPError):
+    status = 401
+    pass
+
+class HTTPForbidden (HTTPError):
+    status = 403
+    pass
+
+class HTTPNotFound (HTTPError):
+    status = 404
+    pass
+
+class Timeout (RESTError):
+    pass
+
+class Disabled (RESTError):
     pass
 
 class RESTClient (object):
     def __init__(self, baseurl, credentials,
             apiname='usermanagement',
             apiversion='latest',
+            apitimeout=APITIMEOUT,
             cacheclients=None,
             cachemap=CACHEMAP,
             cachetimeout=CACHETIMEOUT):
@@ -40,6 +79,8 @@ class RESTClient (object):
         self.credentials = credentials
         self.apiname = apiname
         self.apiversion = apiversion
+        self.apitimeout = apitimeout
+        self.enabled = True
 
         if cacheclients is None:
             cacheclients = [ '127.0.0.1:11211' ]
@@ -53,6 +94,9 @@ class RESTClient (object):
 
     def _uri(self):
         return None
+
+    def disable(self):
+        self.enabled = False
 
     def cachekey(self, method, uri, path_info, qs, body):
         ck = hashlib.sha1(method)
@@ -96,6 +140,10 @@ class RESTClient (object):
             return
 
         self.cache.set(ck, (resp, content), time=timeout[1])
+
+    def authenticate(self, username, password):
+        return self.authentication.post(username=username,
+                body={'value': password})
 
 class Component (object):
     def __init__(self, name, parent, api):
@@ -144,10 +192,15 @@ class Component (object):
 
     def request(self, method, uri,
             path_info='', body=None, **params):
+
+        if not self.enabled:
+            return Disabled()
+
         qs = urllib.urlencode([(k.replace('_', '-'), v) for k,v in
                 params.items()])
 
         client = httplib2.Http(
+                timeout=self.api.apitimeout,
                 disable_ssl_certificate_validation=True)
         client.add_credentials(*self.api.credentials)
 
@@ -167,11 +220,17 @@ class Component (object):
 
         cv = self.api.fetch(method, uri, path_info, qs, body)
 
+        resp = content = None
+
         if cv is not None:
             resp, content = cv
         else:
-            resp,content = client.request(url, method,
-                    headers=headers, body=body)
+            try:
+                resp,content = client.request(url, method,
+                        headers=headers, body=body)
+            except socket.timeout:
+                raise Timeout(method, uri, resp, content)
+
             self.api.store(method, uri, path_info, qs, body, resp, content)
 
         if resp['content-type'] == 'application/json':
@@ -179,8 +238,14 @@ class Component (object):
 
         if resp['status'].startswith('5'):
             raise APIError(method, uri, resp, content)
+        elif resp['status'].startswith('4'):
+            for c in HTTPError.__subclasses__():
+                if str(c.status) == resp['status']:
+                    raise c(method, uri, resp, content)
 
-        return resp['status'], content
+            raise HTTPError(method, uri, resp, content)
+
+        return content
 
 if __name__ == '__main__':
     import sys
@@ -193,60 +258,4 @@ if __name__ == '__main__':
 
     creds=('pubtkt-bar', 'rovHeyftEgaikFoohyk2')
     a = RESTClient('https://id.seas.harvard.edu/crowd', creds)
-
-    print 'Check cookie config.'
-    res, content = a.config.cookie()
-    assert res == '200'
-    assert content['name'] == 'crowd.token_key'
-
-    print 'Check invalid request.'
-    assert a.user()[0] == '400'
-
-    print 'Check users.'
-    assert a.user(username='joeuser')[0] == '200'
-    assert a.user(username='janeuser')[0] == '200'
-    assert a.user.attribute(username='janeuser')[0] == '200'
-
-    print 'Check groups.'
-    assert a.group(groupname='test-group-2')[0] == '200'
-
-    print 'Check session create.'
-    # janeuser does not have access to pubtkt-bar
-    res, content = a.session.post(validate_password='false',
-            body={'username': 'janeuser'})
-    assert res == '403'
-
-    # joeuser does.
-    res, content = a.session.post(validate_password='false',
-            body={'username': 'joeuser'})
-    assert res == '201'
-    token = content['token']
-
-    print 'Check session validate.'
-    res, content = a.session.post('/%s' % token)
-    assert res == '200'
-
-    res, content = a.session('/%s' % token)
-    assert res == '200'
-
-    print 'Check session delete.'
-    res, content = a.session.delete('/%s' % token)
-    assert res == '204'
-
-    time.sleep(sleeptime)
-
-    try:
-        res, content = a.session('/%s' % token)
-        assert res == '400'
-    except AssertionError:
-        print 'Assertion failed, but this is due to caching.'
-
-    res, content = a.session.post('/%s' % token)
-    assert res == '404'
-
-    print 'Check unknown method call.'
-    res, content = a.does_not_exist()
-    assert res == '404'
-
-    print 'All assertions passed.'
 
