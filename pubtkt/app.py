@@ -4,6 +4,7 @@ import datetime
 import pprint
 import urllib
 import time
+import logging
 
 import memcache
 import cherrypy
@@ -28,12 +29,13 @@ class FoundSSOToken (Exception):
 class App (object):
     cookiename = 'seas_ac_auth'
 
-    def __init__ (self, config):
+    def __init__ (self, config, debug=False):
         '''``config`` is a path to a cherrypy-style configuration
         file (which means INI style, but the values have to be valid
         Python.'''
 
         self.config = config
+        self.debug = debug
 
     def error(self, status, message, traceback, version):
         '''Called on unexpected errors via error_page.default'''
@@ -69,6 +71,9 @@ class App (object):
         cherrypy.request.ctx and, if possible, initializes
         the Crowd API objects and processes authentication 
         cookies.'''
+
+        if self.debug:
+            cherrypy.request.app.log.error_log.setLevel(logging.DEBUG)
 
         log = self.makelogger('SETUP')
         log('Starting setup_request.')
@@ -160,17 +165,20 @@ class App (object):
         that fails will then handle password authentication.'''
 
         log = self.makelogger('LOGIN')
-        log('Login request to %s by %s.' % (appname, user or 'unknown'))
+        log('Login request to %s by %s.' % (appname, user or 'unknown'),
+                severity=logging.INFO)
 
         try:
             self.preauth()
             self.authenticate(user, password)
         except LoginOK, detail:
             log('Login okay: %s via %s' %
-                    (cherrypy.request.ctx['auth_user'], detail))
+                    (cherrypy.request.ctx['auth_user'], detail),
+                    severity=logging.INFO)
             return self.set_cookie_and_redirect()
         except LoginFAIL, detail:
-            log('Login failed: %s' % detail)
+            log('Login failed: %s' % detail, 
+                    severity=logging.WARNING)
             return self.loginform('Bad username or password.')
 
         return self.loginform()
@@ -189,7 +197,7 @@ class App (object):
                 params=cherrypy.request.params,
                 request=cherrypy.request)
 
-    def makelogger(self, context):
+    def makelogger(self, context, severity=logging.DEBUG):
         '''This is a convenience wrapper for cherrypy.request.app.log
         that returns a callable for logging a message with the given
         context.  That is::
@@ -204,10 +212,13 @@ class App (object):
 
         But it will save you typing if you need to send more than
         one log message.'''
-            
+
         def _ (*args, **kwargs):
             kwargs['context'] = context
+            if severity is not None:
+                kwargs.setdefault('severity', severity)
             return cherrypy.request.app.log(*args, **kwargs)
+
         return _
 
     def authenticate(self, user, password):
@@ -304,7 +315,7 @@ class App (object):
             cherrypy.request.cv['auth_time'] = time.time()
             cherrypy.request.cv['session'] = session
         except (crowd.Disabled,crowd.Timeout):
-            log('Crowd timed out')
+            log('Crowd timed out', severity=logging.ERROR)
             cherrypy.request.api.disable()
 
             if not 'session' in cherrypy.request.cv:
@@ -349,7 +360,7 @@ class App (object):
             else:
                 log('Failed to get groups from Crowd (%s).' % res)
         except (crowd.Disabled,crowd.Timeout):
-            log('Crowd timed out')
+            log('Crowd timed out', severity=logging.ERROR)
             cherrypy.request.api.disable()
             groups = cherrypy.request.cv.get('groups', [])
 
@@ -418,9 +429,10 @@ class App (object):
         return ('%s:%s' % (appname, crowd_token)).encode('UTF-8')
 
     def delete_cached_credentials(self):
-        ck = self.cache_key()
-        cherrypy.request.mc.delete(ck)
-        cherrypy.request.cv = None
+        if 'crowd_token' in cherrypy.request.ctx:
+            ck = self.cache_key()
+            cherrypy.request.mc.delete(ck)
+            cherrypy.request.cv = None
 
     def unauth(self, appname, back=None):
         return self.render('unauth', back=back)
@@ -469,6 +481,9 @@ class App (object):
         cherrypy.config.update(self.config)
         for k, v in defaults.items():
             cherrypy.config['pubtkt'].setdefault(k,v)
+
+        if cherrypy.config['pubtkt'].get('debug', 'no').lower() == 'yes':
+            self.debug = True
 
     def setup_hooks(self):
         cherrypy.tools.setup_request = cherrypy.Tool('on_start_resource',

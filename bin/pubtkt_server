@@ -9,11 +9,12 @@ import pubtkt.app
 def parse_args():
     p = optparse.OptionParser()
     p.add_option('-f', '--config')
+    p.add_option('-d', '--debug', action='store_true', default=False)
     return p.parse_args()
 
 def main():
     opts, args = parse_args()
-    webapp = pubtkt.app.App(opts.config)
+    webapp = pubtkt.app.App(opts.config, debug=opts.debug)
     webapp.run()
 
 if __name__ == '__main__':

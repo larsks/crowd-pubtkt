@@ -115,22 +115,20 @@ class Crowd (object):
                 username=user)
 
     def create_session(self, user, password=None, factors=None):
-        if password is None:
-            uri = 'session?validate-password=false'
-        else:
-            uri = 'session'
+        validate_password = password and 'true' or 'false'
 
         if factors is None:
             factors = []
 
-        return self.request(uri,
+        return self.request('session',
                 postdata={
                     'username': user,
                     'password': password,
                     'validation-factors': {
                         'validationFactors': factors
                         }
-                    }
+                    },
+                **{'validate-password': validate_password}
                 )
 
     def verify_session(self, token, factors=None):
