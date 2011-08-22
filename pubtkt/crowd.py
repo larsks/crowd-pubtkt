@@ -1,187 +1,176 @@
-# We need this to catch socket.timeout
-import socket
-
-import simplejson as json
-import httplib2 as httplib
+import httplib2
 import urllib
+import simplejson as json
+import memcache
 
-class CrowdError (Exception):
+METHODS = [ 'get', 'post', 'put', 'delete' ]
+
+class RESTError(Exception):
     pass
 
-class APIError (CrowdError):
-    def __init__ (self, msg, resp=None, content=None):
+class APIError (RESTError):
+    def __init__ (self, method, uri, resp, content):
+        self.method = method
+        self.uri = uri
         self.resp = resp
         self.content = content
-        super(CrowdError, self).__init__(msg)
 
-class Timeout (CrowdError):
+        super(APIError, self).__init__('Error %s from %s' %
+                (resp['status'], uri))
+
+class ObjectNotFound (RESTError):
     pass
 
-class Disabled (CrowdError):
-    pass
-
-class Crowd (object):
-
-    '''Wraps the Crowd REST API in some convenience
-    functions.'''
-
-    def __init__ (self, baseurl, crowd_name, crowd_pass, 
-            apiname='usermanagement', apiversion='latest',
-            novalidate=True, timeout=None):
-
-        '''baseurl -- base URL of the Crowd instance
-        crowd_name -- crowd application name
-        crowd_pass -- crowd application password
-        apiname -- name of the api ("usermanagement")
-        apiversion -- api version ("latest")
-        novalidate -- True to disable certificate validation
-                      for SSL connections (True).
-        timeout    -- timeout value passed to httplib2.
-        '''
-
+class RESTClient (object):
+    def __init__(self, baseurl, credentials,
+            apiname='usermanagement',
+            apiversion='latest'):
         self.baseurl = baseurl
+        self.credentials = credentials
         self.apiname = apiname
         self.apiversion = apiversion
-        self.crowd_name = crowd_name
-        self.crowd_pass = crowd_pass
-        self.enabled = True
+        self.cache = memcache.Client(['127.0.0.1:11211'])
 
-        self.client = httplib.Http(
-                disable_ssl_certificate_validation=novalidate,
-                timeout=timeout)
-        self.client.add_credentials(self.crowd_name, self.crowd_pass)
+    def __getattr__ (self, k):
+        return Component(k, self, self)
 
-    def __str__ (self):
-        return '<Crowd %s @ %s>' % (
-                self.crowd_name,
-                self.baseurl)
+    def _uri(self):
+        return None
 
-    def disable(self):
-        self.enabled = False
+class Component (object):
+    def __init__(self, name, parent, api):
+        self.name = name
+        self.parent = parent
+        self.api = api
 
-    def request(self, uri, path_info='', add_json=True, 
-            method='GET', postdata=None, debug=False, **params):
+    def __str__(self):
+        return '<Component %s>' % self.name
 
-        if not self.enabled:
-            raise Disabled()
-
-        # Turn the params dictionary into a query string,
-        qs = urllib.urlencode(params)
-
-        if add_json:
-            ext='.json'
+    def __getattr__ (self, k):
+        if k in METHODS:
+            return self._method(k)
         else:
-            ext=''
+            return Component(k, self, self.api)
 
-        # Build the complete URL from all the pieces.
-        url = '%s/rest/%s/%s/%s%s%s?%s' % (
-                self.baseurl,
-                self.apiname,
-                self.apiversion,
-                uri, ext, path_info, qs)
+    def _method(self, k):
+        '''Returns a wrapper on self.request that passes in the
+        correct HTTP method and otherwise massages the request.'''
 
-        body = None
+        def _(*args, **kwargs):
+            kwargs.setdefault('body', {})
+            if args:
+                kwargs.setdefault('path_info', args[0])
+
+            return self.request(k.upper(), self.uri(), **kwargs)
+
+        _.__name__ = '%s.%s' % (self.uri(), k.upper())
+        return _
+
+    def __call__ (self, *args, **kwargs):
+        '''If you call a component (e.g., api.user()), it's the same
+        as calling component.get() (e.g., api.user.get()).'''
+        return self.get(*args, **kwargs)
+
+    def _uri(self):
+        p = self.parent._uri()
+        if p is not None:
+            return [self.name] + p
+        else:
+            return [self.name]
+
+    def uri(self):
+        '''Return the URI of this component.'''
+        return '/'.join(reversed(self._uri()))
+
+    def request(self, method, uri,
+            path_info='', body=None, **params):
+        qs = urllib.urlencode([(k.replace('_', '-'), v) for k,v in
+                params.items()])
+
+        client = httplib2.Http(
+                disable_ssl_certificate_validation=True)
+        client.add_credentials(*self.api.credentials)
+
+        url = '%s/rest/%s/%s/%s%s?%s' % (
+                self.api.baseurl,
+                self.api.apiname,
+                self.api.apiversion,
+                uri, path_info, qs)
+
         headers = {
                 'Content-type'  : 'application/json',
+                'Accept'  : 'application/json',
                 }
 
-        if postdata is not None:
-            method = 'POST'
-            body = json.dumps(postdata)
+        if body is not None:
+            body = json.dumps(body)
 
-        if debug:
-            print '=== DEBUG ==='
-            print 'URL:', url
-            print 'BODY:', body
-            print '=== DEBUG ==='
+        resp,content = client.request(url, method,
+                headers=headers, body=body)
 
-        try:
-            resp,content = self.client.request(url, method,
-                    headers=headers, body=body)
-        except socket.timeout:
-            raise Timeout()
-
-        if add_json and resp['content-type'] != 'application/json':
-            raise CrowdError('Did not receive JSON response.',
-                    resp=resp, content=content)
-        elif add_json:
+        if resp['content-type'] == 'application/json':
             content = json.loads(content)
+
+        if resp['status'].startswith('5'):
+            raise APIError(method, uri, resp, content)
+        if resp['status'] == '404':
+            raise ObjectNotFound(url)
 
         return resp['status'], content
 
-    def authenticate(self, user, password):
-        '''Authenticate a username and password.'''
-        return self.request('authentication',
-                postdata={ 'value': password },
-                username=user)
-
-    def create_session(self, user, password=None, factors=None):
-        validate_password = password and 'true' or 'false'
-
-        if factors is None:
-            factors = []
-
-        return self.request('session',
-                postdata={
-                    'username': user,
-                    'password': password,
-                    'validation-factors': {
-                        'validationFactors': factors
-                        }
-                    },
-                **{'validate-password': validate_password}
-                )
-
-    def verify_session(self, token, factors=None):
-        if factors is None:
-            factors = []
-
-        return self.request('session/%s' % token,
-                postdata = {
-                    'validationFactors': factors
-                    }
-                )
-
 if __name__ == '__main__':
-    import sys
+    creds=('pubtkt-bar', 'rovHeyftEgaikFoohyk2')
+    a = RESTClient('https://id.seas.harvard.edu/crowd', creds)
 
-    cfoo = Crowd('https://id.seas.harvard.edu/crowd',
-            'pubtkt-foo', 'UkyecUfzeymKivUcunye')
-    cbar = Crowd('https://id.seas.harvard.edu/crowd',
-            'pubtkt-bar', 'rovHeyftEgaikFoohyk2')
+    print 'Check cookie config.'
+    res, content = a.config.cookie()
+    assert res == '200'
+    assert content['name'] == 'crowd.token_key'
 
-    print 'AUTHENTICATE'
-    print '=' * 75
-    for app in [cfoo, cbar]:
-        for user in [['joeuser', 'hello'], ['joeuser', 'badpass'], ['janeuser', 'goodbye']]:
-            res, content = app.authenticate(*user)
-            print app, 'as', user[0], res
-            print content
+    print 'Check invalid request.'
+    assert a.user()[0] == '400'
 
-    print 'CREATE SESSION'
-    print '=' * 75
-    res, s1 = cfoo.request('session', postdata={
-        'username': 'joeuser', 'password': 'hello'})
-    print cfoo, 'as', 'joeuser', res, s1.get('token', '<NONE>') 
-    res, s2 = cfoo.create_session('janeuser', 'goodbye',
-            factors=[{'name': 'remote_address', 'value': '127.0.0.1'}])
-    print cfoo, 'as', 'janeuser', res, s2.get('token', '<NONE>') 
-    print s2
+    print 'Check users.'
+    assert a.user(username='joeuser')[0] == '200'
+    assert a.user(username='janeuser')[0] == '200'
 
-    res, s3 = cbar.request('session', postdata={
-        'username': 'joeuser', 'password': 'hello'})
-    print cbar, 'as', 'joeuser', res, s3.get('token', '<NONE>') 
-    res, s4 = cbar.request('session', postdata={
-        'username': 'janeuser', 'password': 'goodbye'})
-    print cbar, 'as', 'janeuser', res, s4.get('token', '<NONE>') 
+    print 'Check groups.'
+    assert a.group(groupname='test-group-2')[0] == '200'
 
-    print 'VALIDATE SESSION'
-    print '=' * 75
-    res, v1 = cfoo.verify_session(s2['token'],
-            factors=[{'name': 'remote_address', 'value': '127.0.0.1'}])
-    print cfoo, 'as', s2['user']['name'], res
-    print v1
-    res, v2 = cfoo.request('session/%s' % s3['token'],
-            postdata = {})
-    print cfoo, 'as', s3['user']['name'], res
+    print 'Check session create.'
+    # janeuser does not have access to pubtkt-bar
+    res, content = a.session.post(validate_password='false',
+            body={'username': 'janeuser'})
+    assert res == '403'
+
+    # joeuser does.
+    res, content = a.session.post(validate_password='false',
+            body={'username': 'joeuser'})
+    assert res == '201'
+    token = content['token']
+
+    print 'Check session validate.'
+    res, content = a.session.post('/%s' % token)
+    assert res == '200'
+
+    print 'Check session delete.'
+    res, content = a.session.delete('/%s' % token)
+    assert res == '204'
+
+    detail = None
+    try:
+        res, content = a.session.post('/%s' % token)
+    except ObjectNotFound, detail:
+        pass
+    assert isinstance(detail, ObjectNotFound)
+
+    print 'Check unknown method call.'
+    detail = None
+    try:
+        res, content = a.does_not_exist()
+    except ObjectNotFound, detail:
+        pass
+    assert isinstance(detail, ObjectNotFound)
+
+    print 'All assertions passed.'
 
