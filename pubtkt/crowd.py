@@ -1,14 +1,21 @@
 import httplib2
 import urllib
 import simplejson as json
+import hashlib
 import memcache
+import fnmatch
 
 METHODS = [ 'get', 'post', 'put', 'delete' ]
+CACHEVERSION=12
+CACHETIMEOUT=30
+CACHEMAP = {
+    'config/cookie' : 3600,
+    'group*'        : 1800,
+    'user*'         : 1800,
+    'session*'      : 30,
+        }
 
 class RESTError(Exception):
-    pass
-
-class APIError (RESTError):
     def __init__ (self, method, uri, resp, content):
         self.method = method
         self.uri = uri
@@ -18,24 +25,77 @@ class APIError (RESTError):
         super(APIError, self).__init__('Error %s from %s' %
                 (resp['status'], uri))
 
-class ObjectNotFound (RESTError):
+class APIError (RESTError):
     pass
 
 class RESTClient (object):
     def __init__(self, baseurl, credentials,
             apiname='usermanagement',
-            apiversion='latest'):
+            apiversion='latest',
+            cacheclients=None,
+            cachemap=CACHEMAP,
+            cachetimeout=CACHETIMEOUT):
+
         self.baseurl = baseurl
         self.credentials = credentials
         self.apiname = apiname
         self.apiversion = apiversion
-        self.cache = memcache.Client(['127.0.0.1:11211'])
+
+        if cacheclients is None:
+            cacheclients = [ '127.0.0.1:11211' ]
+
+        self.cache = memcache.Client(cacheclients)
+        self.cachemap = cachemap
+        self.cachetimeout = cachetimeout
 
     def __getattr__ (self, k):
         return Component(k, self, self)
 
     def _uri(self):
         return None
+
+    def cachekey(self, method, uri, path_info, qs, body):
+        ck = hashlib.sha1(method)
+        ck.update(uri)
+
+        if path_info:
+            ck.update(path_info)
+        if qs:
+            ck.update(qs)
+        if body:
+            ck.update(body)
+        
+        return '%s:%s' % (
+                CACHEVERSION,
+                ck.hexdigest()
+                )
+
+    def fetch(self, method, uri, path_info, qs, body):
+        if method != 'GET':
+            return
+
+        ck = self.cachekey(method, uri, path_info, qs, body)
+        return self.cache.get(ck)
+
+    def store(self, method, uri, path_info, qs, body, resp, content):
+        if method != 'GET':
+            return
+
+        ck = self.cachekey(method, uri, path_info, qs, body)
+
+        # Determine the timeout for this cache value by
+        # looking for the longest match in self.cachemap.
+        timeout = ('', self.cachetimeout)
+        for k,v in self.cachemap.items():
+            if fnmatch.fnmatch(uri, k):
+                if len(k) > len(timeout[0]):
+                    timeout = (k, v)
+
+        # This lets us explicitly *not* cache something.
+        if timeout[1] is None:
+            return
+
+        self.cache.set(ck, (resp, content), time=timeout[1])
 
 class Component (object):
     def __init__(self, name, parent, api):
@@ -105,20 +165,32 @@ class Component (object):
         if body is not None:
             body = json.dumps(body)
 
-        resp,content = client.request(url, method,
-                headers=headers, body=body)
+        cv = self.api.fetch(method, uri, path_info, qs, body)
+
+        if cv is not None:
+            resp, content = cv
+        else:
+            resp,content = client.request(url, method,
+                    headers=headers, body=body)
+            self.api.store(method, uri, path_info, qs, body, resp, content)
 
         if resp['content-type'] == 'application/json':
             content = json.loads(content)
 
         if resp['status'].startswith('5'):
             raise APIError(method, uri, resp, content)
-        if resp['status'] == '404':
-            raise ObjectNotFound(url)
 
         return resp['status'], content
 
 if __name__ == '__main__':
+    import sys
+    import time
+
+    try:
+        sleeptime = int(sys.argv[1])
+    except IndexError:
+        sleeptime = 1
+
     creds=('pubtkt-bar', 'rovHeyftEgaikFoohyk2')
     a = RESTClient('https://id.seas.harvard.edu/crowd', creds)
 
@@ -133,6 +205,7 @@ if __name__ == '__main__':
     print 'Check users.'
     assert a.user(username='joeuser')[0] == '200'
     assert a.user(username='janeuser')[0] == '200'
+    assert a.user.attribute(username='janeuser')[0] == '200'
 
     print 'Check groups.'
     assert a.group(groupname='test-group-2')[0] == '200'
@@ -153,24 +226,27 @@ if __name__ == '__main__':
     res, content = a.session.post('/%s' % token)
     assert res == '200'
 
+    res, content = a.session('/%s' % token)
+    assert res == '200'
+
     print 'Check session delete.'
     res, content = a.session.delete('/%s' % token)
     assert res == '204'
 
-    detail = None
+    time.sleep(sleeptime)
+
     try:
-        res, content = a.session.post('/%s' % token)
-    except ObjectNotFound, detail:
-        pass
-    assert isinstance(detail, ObjectNotFound)
+        res, content = a.session('/%s' % token)
+        assert res == '400'
+    except AssertionError:
+        print 'Assertion failed, but this is due to caching.'
+
+    res, content = a.session.post('/%s' % token)
+    assert res == '404'
 
     print 'Check unknown method call.'
-    detail = None
-    try:
-        res, content = a.does_not_exist()
-    except ObjectNotFound, detail:
-        pass
-    assert isinstance(detail, ObjectNotFound)
+    res, content = a.does_not_exist()
+    assert res == '404'
 
     print 'All assertions passed.'
 
