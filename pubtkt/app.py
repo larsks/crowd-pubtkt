@@ -14,6 +14,10 @@ import ticket
 import crowd
 import pages
 
+# CACHEVERSION is prepended to cache keys.  This lets us 
+# invalidate the cache (e.g., in the event of an incompatible
+# change in the format of cached data) by simply incrementing
+# CACHEVERSION.
 CACHEVERSION=2
 
 class LoginOK (Exception):
@@ -47,7 +51,7 @@ class App (object):
                 message=message)
 
     def get_api_object(self, appname):
-        '''Creates a new crowd.Crowd object using the
+        '''Creates a new ``crowd.RESTClient`` object using the
         configuration appropriate to the current request.'''
 
         conf = cherrypy.request.config['pubtkt']
@@ -55,7 +59,8 @@ class App (object):
         try:
             appconf = cherrypy.request.config['crowd:%s' % appname]
         except KeyError:
-            raise cherrypy.HTTPError('404')
+            raise cherrypy.HTTPError('404',
+                    'Cannot find the requested application.')
 
         crowd_server = conf['crowd_server']
         if crowd_server.endswith('/'):
@@ -72,6 +77,51 @@ class App (object):
         cherrypy.request.appconf = appconf
         cherrypy.request.api = api
 
+    def cachekey(self):
+        ctx = cherrypy.request.ctx
+
+        token = ctx['crowd_token']
+        appname = ctx['appname']
+        key = ('%s:%s:%s' % (CACHEVERSION, appname, token)).encode('UTF-8')
+        print 'KEY:', key
+        return key
+
+    def store(self):
+        cherrypy.request.app.log('Storing credentials in cache.',
+                context='SETUP')
+        conf = cherrypy.request.config['pubtkt']
+        timeout = int(conf['trust_timeout'])
+
+        try:
+            key = self.cachekey()
+            cherrypy.request.cache.set(key, cherrypy.request.cv,
+                    time = timeout)
+        except KeyError:
+            pass
+
+    def fetch(self):
+        cherrypy.request.app.log('Looking for credentials in cache.',
+                context='SETUP')
+        try:
+            key = self.cachekey()
+            val = cherrypy.request.cache.get(key)
+            if val is not None:
+                cherrypy.request.app.log('Found credentials in cache.',
+                        context='SETUP')
+        except KeyError:
+            cherrypy.request.app.log('No credentials in cache.',
+                    context='SETUP')
+
+        if val is None:
+            val = {}
+
+        cherrypy.request.cv = val
+
+    def setup_cache(self):
+        conf = cherrypy.request.config['pubtkt']
+        cherrypy.request.cache = memcache.Client(conf['memcache_clients'])
+        cherrypy.request.cv = {}
+
     def setup_request(self):
         '''This is called at the start of every request.'''
 
@@ -81,17 +131,15 @@ class App (object):
         log = self.makelogger('SETUP')
         log('Starting setup_request.')
 
+        self.setup_cache()
+
+        ctx = cherrypy.request.ctx = {}
         if not 'appname' in cherrypy.request.params:
             log('No appname in request.')
             return
+        ctx['appname'] = cherrypy.request.params['appname']
 
-        conf = cherrypy.request.config['pubtkt']
-        ctx = cherrypy.request.ctx = {}
-        cherrypy.request.cv = {}
-        cherrypy.request.mc = memcache.Client(conf['memcache_clients'])
-
-        self.get_api_object(
-                cherrypy.request.params['appname'])
+        self.get_api_object(cherrypy.request.params['appname'])
 
         # Read Crowd cookie configuration.
         cookie = cherrypy.request.api.config.cookie()
@@ -104,15 +152,11 @@ class App (object):
         except FoundSSOToken:
             pass
 
-        ck = self.cachekey()
-        cv = cherrypy.request.mc.get(ck)
-
-        if cv is not None:
-            cherrypy.request.cv.update(cv)
-            log('Found trusted credentials in cache.')
+        self.fetch()
 
     def get_token_from_pubtkt(self):
         log = self.makelogger('SETUP')
+        ctx = cherrypy.request.ctx
 
         # Read pubtkt cookie (and extract crowd token).
         # TODO: Do we care?  Not sure.
@@ -126,8 +170,8 @@ class App (object):
                 pubtkt.verify(self.pubkey)
                 log('Verified signature on pubtkt cookie.')
                 log('Getting crowd token from pubtkt cookie.')
-                cherrypy.request.ctx['pubtkt'] = pubtkt
-                cherrypy.request.ctx['crowd_token'] = pubtkt['udata']
+                ctx['pubtkt'] = pubtkt
+                ctx['crowd_token'] = pubtkt['udata']
                 raise FoundSSOToken()
             except ticket.TicketError, detail:
                 log('Error processing pubtkt: %s' % detail)
@@ -138,7 +182,7 @@ class App (object):
 
         if ctx['crowd_cookie_name'] in cherrypy.request.cookie:
             log('Getting crowd token from Crowd SSO cookie.')
-            cherrypy.request.ctx['crowd_token'] = \
+            ctx['crowd_token'] = \
                     cherrypy.request.cookie[ctx['crowd_cookie_name']].value
             raise FoundSSOToken()
 
@@ -156,14 +200,7 @@ class App (object):
         ctx = cherrypy.request.ctx
         conf = cherrypy.request.config['pubtkt']
 
-        if cherrypy.request.cv:
-            ck = self.cachekey()
-            timeout = int(conf['trust_timeout'])
-            log('Storing cached credentials in cache key %s.' % ck)
-            cherrypy.request.mc.set(
-                    ck, 
-                    cherrypy.request.cv,
-                    time=timeout)
+        self.store()
 
     def login(self, appname, back=None, user=None, password=None,
             submit=None, alert=None):
@@ -260,7 +297,6 @@ class App (object):
 
             cv['userinfo'] = userinfo
             cv['session'] = session
-            cv['auth_time'] = time.time()
             ctx['crowd_token'] = session['token']
             ctx['auth_user'] = user
 
@@ -315,7 +351,6 @@ class App (object):
             session = cherrypy.request.api.session.post('/%s' % crowd_token)
 
             log('Crowd token is valid.')
-            cherrypy.request.cv['auth_time'] = time.time()
             cherrypy.request.cv['session'] = session
         except crowd.HTTPError, detail:
             log('Crowd token is not valid (%s)' % detail)
@@ -433,14 +468,6 @@ class App (object):
         self.delete_crowd_cookie()
         self.delete_pubtkt_cookie()
         return self.render('logout', back=back)
-
-    def cachekey(self):
-        if not 'crowd_token' in cherrypy.request.ctx:
-            return
-
-        crowd_token = cherrypy.request.ctx['crowd_token']
-        appname = cherrypy.request.params['appname']
-        return ('%s:%s:%s' % (CACHEVERSION, appname, crowd_token)).encode('UTF-8')
 
     def delete_cached_credentials(self):
         ck = self.cachekey()

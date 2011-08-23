@@ -42,23 +42,32 @@ class APIError (RESTError):
     pass
 
 class HTTPError (RESTError):
-    pass
+    def __str__ (self):
+        return 'Error %s (%s)' % (self.status, self.text)
 
 class HTTPBadRequest (HTTPError):
     status = 400
-    pass
+    text = 'Bad request'
 
 class HTTPUnauthorized (HTTPError):
     status = 401
-    pass
+    text = 'Unauthorized'
 
 class HTTPForbidden (HTTPError):
     status = 403
-    pass
+    text = 'Forbidden'
 
 class HTTPNotFound (HTTPError):
     status = 404
-    pass
+    text = 'Resource not found'
+
+class HTTPMethodNotAllowed (HTTPError):
+    status = 405
+    text = 'Method not allowed'
+
+class HTTPNotAcceptable (HTTPError):
+    status = 406
+    text = 'Not acceptable'
 
 class Timeout (RESTError):
     pass
@@ -90,7 +99,7 @@ class RESTClient (object):
         self.cachetimeout = cachetimeout
 
     def __getattr__ (self, k):
-        return Component(k, self, self)
+        return Resource(k, self, self)
 
     def _uri(self):
         return None
@@ -139,26 +148,27 @@ class RESTClient (object):
         if timeout[1] is None:
             return
 
+        print 'SET', ck, method, uri, timeout
         self.cache.set(ck, (resp, content), time=timeout[1])
 
     def authenticate(self, username, password):
         return self.authentication.post(username=username,
                 body={'value': password})
 
-class Component (object):
+class Resource (object):
     def __init__(self, name, parent, api):
         self.name = name
         self.parent = parent
         self.api = api
 
     def __str__(self):
-        return '<Component %s>' % self.name
+        return '<Resource %s>' % self.name
 
     def __getattr__ (self, k):
         if k in METHODS:
             return self._method(k)
         else:
-            return Component(k, self, self.api)
+            return Resource(k, self, self.api)
 
     def _method(self, k):
         '''Returns a wrapper on self.request that passes in the
