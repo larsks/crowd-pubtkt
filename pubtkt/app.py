@@ -78,15 +78,20 @@ class App (object):
         cherrypy.request.api = api
 
     def cachekey(self):
+        '''Generate the cache key for storing cached session
+        information.'''
+
         ctx = cherrypy.request.ctx
 
         token = ctx['crowd_token']
         appname = ctx['appname']
-        key = ('%s:%s:%s' % (CACHEVERSION, appname, token)).encode('UTF-8')
-        print 'KEY:', key
-        return key
+        return ('%s:%s:%s' % (CACHEVERSION, appname, token)).encode('UTF-8')
 
     def store(self):
+        '''Store session information in the cache.  Gets the cache key
+        from self.cachekey() then stores the value of
+        cherrypy.request.cv.'''
+
         cherrypy.request.app.log('Storing credentials in cache.',
                 context='SETUP')
         conf = cherrypy.request.config['pubtkt']
@@ -100,6 +105,9 @@ class App (object):
             pass
 
     def fetch(self):
+        '''Fetch stored session information and populate
+        cherrypy.request.cv.'''
+
         cherrypy.request.app.log('Looking for credentials in cache.',
                 context='SETUP')
         try:
