@@ -1,3 +1,5 @@
+*WARNING* This project was only ever me fiddling with code and probably has nothing useful to offer anybody else.
+
 Crowd-Pubtkt
 ============
 
